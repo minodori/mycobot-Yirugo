@@ -1,0 +1,19 @@
+# colcon build artifacts
+build/
+install/
+log/
+
+# nested git repos (each has its own history, tracked separately)
+src/mycobot_ros2/
+src/easy_handeye2/
+src/pymoveit2/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# transient debugging output (tf2_tools view_frames, run logs)
+frames_*.gv
+frames_*.pdf
+*.log
