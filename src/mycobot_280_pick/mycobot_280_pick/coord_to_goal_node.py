@@ -49,6 +49,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.time import Time
 from shape_msgs.msg import SolidPrimitive
+from std_srvs.srv import Empty
 from tf2_geometry_msgs import do_transform_point
 import tf2_ros
 
@@ -138,13 +139,17 @@ class CoordToGoalNode(Node):
             PlanningScene, 'planning_scene', 10
         )
 
-        # URDF에 없는 실제 그리퍼를 자기 몸 필터에 포함시키기 위한 임시
-        # attached collision object 등록 (위 모듈 상수 설명 참고). 디스커버리
-        # 지연으로 첫 발행이 유실될 수 있어 몇 번 반복함.
+        # 그리퍼 근접거리 depth 노이즈로 self-filter(padding)가 못 걸러내는 잔여
+        # voxel이 START_STATE_IN_COLLISION을 유발하는 경우가 있어(카메라 min-range
+        # 노이즈로 추정, 2026-07-23 확인), 플래닝 직전 octomap 전체를 한 번 비움.
+        self._clear_octomap_client = self.create_client(Empty, '/clear_octomap')
+
+        # 이 워크스페이스의 URDF는 이미 실제 그리퍼(mycobot_280_m5_adaptive_gripper)를
+        # 포함하고 있어 아래 임시 박스 콜리전(그리퍼 미포함 URDF 대응용)이 필요 없음 —
+        # 오히려 실제 그리퍼 메시와 겹쳐 자기충돌(START_STATE_IN_COLLISION)을 일으켜서
+        # 비활성화함. 그리퍼 없는 URDF로 되돌아가면 아래 두 줄을 복원할 것.
         self._gripper_publish_count = 0
-        self._gripper_publish_timer = self.create_timer(
-            GRIPPER_PUBLISH_RETRY_PERIOD_SEC, self._publish_gripper_collision_object
-        )
+        self._gripper_publish_timer = None
 
         self._subscription = self.create_subscription(
             PointStamped,
@@ -262,6 +267,9 @@ class CoordToGoalNode(Node):
     def _start_planning(self) -> None:
         self._clear_timer.cancel()
         self._clear_timer = None
+
+        if self._clear_octomap_client.service_is_ready():
+            self._clear_octomap_client.call_async(Empty.Request())
 
         approach_position = self._pending_approach_position
         approach_quat = [0.0, 0.0, 0.0, 1.0]  # TODO: 접근 방향에 맞는 orientation 필요
