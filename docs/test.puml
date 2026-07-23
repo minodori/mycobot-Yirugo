@@ -1,0 +1,55 @@
+@startuml
+skinparam defaultTextAlignment center
+skinparam rectangle {
+  BackgroundColor White
+  BorderColor Black
+}
+
+rectangle "D435 카메라" as D435
+rectangle "dg_ai_service:\nharvest_detector_node\n(YOLO tomato_4cls_model.pt)" as DET
+rectangle "DetectTomatoes 서비스 응답" as RESP
+rectangle "tomato_pointcloud_filter\n(원마스크로 사전 필터링)" as PCF
+rectangle "❌ 미구현: 좌표변환 브릿지\ncamera(m) → g_base(mm)\nTF2 + 핸드아이 캘리브레이션" as BRIDGE #Pink
+rectangle "occupancy_map_monitor / Octomap\n(PointCloudOctomapUpdater)" as OCTO
+rectangle "move_group\n(MoveIt2 충돌회피, OMPL)" as MG
+rectangle "coord_to_goal_node\n(approach까지만, 파지 없음)" as CTG
+rectangle "/joint_states 발행" as JS
+
+rectangle "use_moveit 판단\n(장애물 밀도)" as UM
+rectangle "order 정렬" as ORD
+rectangle "HarvestTarget[] 조립" as HT
+rectangle "ddagi_control:\nharvest_server\n(DdagiHarvest 액션)" as HS
+rectangle "arm_solver_direct.pick_direct()\napproach→grip→lift" as SOLVER
+rectangle "❌ moveit_bridge.py\nuse_moveit=True\n(NotImplementedError)" as MBRIDGE #Pink
+rectangle "arm_hardware: pymycobot 싱글턴" as HW
+
+package "RPi-5 (jetcobot)" {
+  rectangle "sync_plan:\n/joint_states 구독 → 각도변환 → send_angles()" as SYNC
+  rectangle "실물 MyCobot280\n(/dev/ttyUSB0, baud=1000000)" as REAL
+}
+
+D435 --> DET : color/depth/camera_info
+DET --> RESP : bbox→원마스크+depth→3D(m)
+RESP --> PCF
+RESP --> BRIDGE
+
+PCF --> OCTO
+OCTO --> MG
+MG --> CTG
+CTG --> JS
+
+BRIDGE --> UM
+UM --> ORD
+ORD --> HT
+HT --> HS
+
+HS --> SOLVER
+HS --> MBRIDGE
+
+JS --> SYNC : 같은 ROS_DOMAIN_ID, LAN
+SOLVER --> HW
+MBRIDGE --> HW
+SYNC --> REAL
+HW --> REAL
+
+@enduml

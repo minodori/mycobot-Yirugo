@@ -735,6 +735,221 @@ Octomap Occupied Voxels가 정확히 맞는 것까지 육안으로 검증함 (�
 
 ---
 
+## 14. MoveIt Hand-Eye Calibration (`moveit_calibration`) 설정
+
+### easy_handeye2와의 차이
+
+`easy_handeye2`(13장)와는 **완전히 별도인 워크스페이스/도구**. 둘 다
+Eye-in-Hand 캘리브레이션을 하지만 타겟과 워크스페이스가 다르다.
+
+| | easy_handeye2 (13장) | moveit_calibration (이 장) |
+|---|---|---|
+| 워크스페이스 | `~/Projects/mycobot` | `~/Projects/moveit_calibration` (완전 별도) |
+| 타겟 | ArUco 단일 마커(`marker_0`) + `aruco_opencv` | ChArUco 보드(체스판+ArUco 결합) |
+| UI | rqt 플러그인 | RViz 플러그인(도킹 패널) |
+| 결과 저장 | `~/.ros2/easy_handeye2/calibrations/<name>.calib` | 수동으로 원하는 경로에 yaml 저장 |
+
+### 설치
+
+```bash
+mkdir -p ~/Projects/moveit_calibration/src
+cd ~/Projects/moveit_calibration
+git clone https://github.com/ros-planning/moveit_calibration.git -b ros2 src/moveit_calibration
+colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
+```
+
+### 실행 방법
+
+**1. RPi(jetcobot) 쪽 — 서보 릴리즈** (손으로 자세를 잡아야 하므로)
+
+```bash
+python3 -c "from pymycobot import MyCobot280; MyCobot280('/dev/ttyJETCOBOT', 1000000).release_all_servos()"
+```
+
+**2. 로컬 PC — 두 워크스페이스 모두 source**
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/Projects/mycobot/install/setup.bash
+source ~/Projects/moveit_calibration/install/setup.bash
+```
+
+**3. 카메라 포함된 기존 launch로 기동** (`demo_octomap.launch.py`를
+씀 — move_group/카메라/rviz2가 다 포함돼 있어 별도 launch 파일을
+새로 만들 필요 없음)
+
+```bash
+ros2 launch mycobot_280_moveit2 demo_octomap.launch.py
+```
+
+**4. RViz에서 패널 추가**
+
+`Panels → Add New Panel → moveit_calibration_gui` 아래
+`HandEyeCalibration` 선택.
+
+⚠️ **주의**: RViz 안에 카메라 영상을 보려고 `Camera`/`Image` 디스플레이를
+따로 추가하면 GPU 렌더링(OGRE) 문제로 죽을 수 있음 (아래 트러블슈팅 참고).
+카메라 화면 확인은 별도 터미널에서:
+```bash
+ros2 run rqt_image_view rqt_image_view /camera/camera/color/image_raw
+```
+
+### Context 탭 설정값
+
+| 필드 | 값 | 근거 |
+|---|---|---|
+| Sensor configuration | `Eye-in-Hand` | |
+| Planning Group | `arm_group` | SRDF에 정의된 유일한 그룹 |
+| Sensor frame | `camera_color_optical_frame` | 이미지/camera_info의 `header.frame_id` |
+| Object frame | `handeye_target` | moveit_calibration이 타겟 검출 시 하드코딩된 고정 이름으로 TF 발행 (Target 탭에서 보드가 인식돼야 드롭다운에 나타남) |
+| End-effector frame | `joint6` | ⚠️ `joint6_flange` 아님! 카메라는 joint6_flange(그리퍼, J6 회전 영향)가 아니라 joint6 링크 자체에 고정됨(11장 실측). 이전 시도(`moveit_hand-eye_cali.yaml`)는 `joint6_flange`로 잘못 저장했었음 |
+| Robot base frame | `g_base` | |
+
+**왜 `Sensor frame`엔 optical frame(자식 프레임)을 써도 되는가** — easy_handeye2의
+`tracking_base_frame`(13장)과 헷갈리기 쉬운 부분. 둘 다 "카메라 기준
+프레임"이라는 개념은 같지만, TF 트리에서 하는 **역할이 다르다**:
+
+- **easy_handeye2 `tracking_base_frame`**: `calibrate.launch.py`의 더미
+  퍼블리셔가 `robot_effector_frame → tracking_base_frame`으로 **새
+  부모를 강제로 붙인다.** `camera_color_optical_frame`은 이미
+  realsense가 부모(`camera_color_frame`)를 정해놨으므로, 부모가
+  2개가 되어 TF 트리가 깨진다 → 뿌리 프레임(`camera_link`)을 써야 함.
+- **moveit_calibration `Sensor frame`**: 타겟 인식에 성공하면
+  `Sensor frame → handeye_target`(완전히 새로 생기는 자식 프레임)을
+  발행한다(`handeye_target_widget.cpp:421`,
+  `handeye_target_base.h:172`의 `child_frame_id = "handeye_target"`).
+  `Sensor frame`은 **부모 역할**로만 쓰이므로, 자기 자신이 기존에 다른
+  부모(`camera_color_frame`)를 갖고 있어도 상관없다 — 한 프레임이
+  부모를 여러 개 가지면 안 되지만 자식은 여러 개 가져도 무방하기 때문.
+
+즉 "새 TF 엣지에서 그 프레임이 부모냐 자식이냐"가 기준이지, 프레임
+이름(`_optical_frame`인지 아닌지) 자체는 기준이 아니다.
+
+### Target 탭 설정값
+
+- **Target Type**: ChArUco board
+- **Camera Image Topic**: `/camera/camera/color/image_raw`
+  (camera_info는 `image_transport::subscribeCamera`가 같은 네임스페이스에서
+  자동으로 같이 구독하므로 별도 지정 불필요)
+- 보드 파라미터(행/열 개수, square size, marker size, dictionary)는
+  실제 인쇄한 보드 치수와 정확히 일치해야 함 — 하나라도 안 맞으면
+  타겟 인식 자체가 안 되고 `Object frame`이 `world`로만 나옴(=검출 실패
+  신호)
+
+### 트러블슈팅
+
+**1. Object frame이 "world"로만 나옴** — 타겟 검출 실패 신호.
+- 보드가 카메라 프레임 안에 온전히 들어와 있는지
+- Target 탭 보드 파라미터가 실제 인쇄 치수와 일치하는지
+- 거리/조명
+
+**2. 모터가 안 풀림(손으로 못 움직임)** — 위 "1. RPi 쪽" 서보 릴리즈
+명령 실행 필요.
+
+**3. `demo_octomap.launch.py`는 FakeSystem(시뮬레이션)이라는 점 주의**
+— 손으로 실물 팔을 움직여도 MoveIt이 읽는 "현재 자세"는 FakeSystem의
+마지막 명령값일 뿐, 실물의 실제 관절각이 아님. easy_handeye2 때
+`follow_display`로 실측 인코더값을 흘려보내야 했던 것과 같은 이유.
+**증상**: 서보만 릴리즈(`release_all_servos()`)하고 손으로 움직이면
+`/joint_states`가 안 바뀌어서, 아무리 다른 자세를 잡아도 매번 "End-effector
+orientation is too similar to a prior sample" 에러가 남 (`ros2 topic
+echo /joint_states`로 직접 확인함 — 값이 고정돼 있었음).
+**해결**: RPi에서 `release_all_servos()` 대신 `follow_display`를 직접
+실행 — 릴리즈 + 실측 각도 발행을 같이 함:
+```bash
+ros2 run mycobot_280jn follow_display --ros-args \
+  -p port:=/dev/ttyJETCOBOT -p baud:=1000000
+```
+FakeSystem의 `joint_state_broadcaster`와 `/joint_states`에 발행자가
+2개(FakeSystem + follow_display)가 되는 셈이지만, 실제로 돌려보니 샘플
+22개 정상 기록·계산까지 문제없이 진행됨(아래 "캘리브레이션 결과" 참고).
+
+**4. 카메라 디스플레이 추가 시 RViz가 SIGSEGV로 죽음**
+(`exit code -11`, 로그에 `failed to create drawable` 반복) — OGRE
+렌더링 문제. `glxinfo | grep "OpenGL renderer"`로 확인해보니 NVIDIA
+RTX 5060(dGPU)이 아니라 **AMD 내장 그래픽(Radeon 780M)으로 렌더링되고
+있었음** — 하이브리드 그래픽 노트북에서 PRIME 오프로드 미설정.
+  - **즉시 우회**: RViz엔 카메라 디스플레이를 추가하지 말고
+    `rqt_image_view`로 별도 확인 (위 3번 참고)
+  - **근본 해결 시도**: NVIDIA로 강제 전환 후 재시도
+    ```bash
+    __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia \
+      ros2 launch mycobot_280_moveit2 demo_octomap.launch.py
+    ```
+    (아직 이 방법으로 재현/해결 검증은 안 됨)
+
+### 시도 이력
+
+**1차 시도 (`moveit_hand-eye_cali.yaml`) — 폐기**: `End-effector frame`을
+`joint6_flange`로 잘못 잡고 진행한 결과라 신뢰할 수 없음.
+```yaml
+# EYE-IN-HAND: joint6_flange -> camera_color_optical_frame
+translation: {x: -0.0753477, y: -0.225542, z: -0.122314}
+rotation: {x: -0.0109544, y: 0.106479, z: -0.0432289, w: 0.993314}
+```
+MoveIt Calibration의 Planning Group 드롭다운은 SRDF 그룹만 나열하는데,
+`arm_group`이 `joint6output_to_joint6`까지 포함해서 tip이 무조건
+`joint6_flange`로 잡힘 — 중간 링크(`joint6`)를 직접 지정하는 필드가
+UI에 없어서 생긴 구조적 문제.
+
+**2차 시도 (`moveit_hand-eye_cali_2.yaml`) — 첫 번째 저장, 폐기**:
+Context 탭의 `Sensor configuration`을 실수로 `Eye-to-Hand`로 선택한 채
+진행 → `joint1 -> camera_color_optical_frame`(카메라가 고정되고
+마커가 손끝에서 움직인다는, 실제와 반대되는 전제)으로 계산되어 무효.
+
+**2차 시도 재작업 (`moveit_hand-eye_cali_2.yaml`, 덮어씀) — ✅ 성공**:
+`Sensor configuration = Eye-in-Hand`, `Robot base frame = g_base`,
+`End-effector frame = joint6`로 정정하고 ChArUco 보드 샘플 22개로 재계산.
+```yaml
+# EYE-IN-HAND: joint6 -> camera_color_optical_frame
+translation: {x: -0.134963, y: -0.233021, z: 0.0967767}
+rotation: {x: -0.687523, y: -0.0403723, z: -0.110947, w: 0.716501}
+```
+YAML 문법/쿼터니언 정규화(노름² ≈ 1.0000007) 모두 정상 확인.
+
+### easy_handeye2와 교차검증 — 일치 확인 ✅
+
+`joint6`과 `camera_color_optical_frame` 사이엔 직접 발행되는 TF가 없고,
+easy_handeye2 결과(`joint6 -> camera_link`)와 realsense 자체 발행
+체인(`camera_link -> camera_color_frame -> camera_color_optical_frame`)이
+TF에서 자동 합성된다. `demo_octomap.launch.py`(camera + robot_state_publisher
++ easy_handeye2 `publish.launch.py` 포함) 켜둔 상태에서 직접 조회:
+```bash
+ros2 run tf2_ros tf2_echo joint6 camera_color_optical_frame
+```
+결과:
+```
+Translation: [-0.135, -0.233, 0.097]
+Rotation (xyzw): [-0.688, -0.040, -0.111, 0.717]
+```
+
+| | tf2_echo (easy_handeye2 합성) | moveit_calibration (`_2.yaml`) | 차이 |
+|---|---|---|---|
+| X | -0.135 | -0.134963 | ~0.04mm |
+| Y | -0.233 | -0.233021 | ~0.02mm |
+| Z | 0.097 | 0.0967767 | ~0.2mm |
+| qx | -0.688 | -0.687523 | 0.0005 |
+| qy | -0.040 | -0.0403723 | 0.0004 |
+| qz | -0.111 | -0.110947 | 0.0001 |
+| qw | 0.717 | 0.716501 | 0.0005 |
+
+차이는 `tf2_echo` 표시 반올림(소수점 3자리) 수준 — 이동 0.2mm 이하,
+회전 오차 1도 미만. **ArUco 단일 마커(easy_handeye2)와 ChArUco 보드
+(moveit_calibration)라는 서로 다른 방법·다른 세션·다른 로봇 위치에서
+독립적으로 계산했는데 사실상 같은 값**이 나와, `joint6 ->
+camera_color_optical_frame` 값의 신뢰도가 상호 검증됨. (g_base의 물리적
+위치가 두 세션 간 달라도 무방한 이유: g_base는 joint6-camera 관계보다
+상류에 있는 별개의 기준점이라 이 비교와 무관.)
+
+### 상태
+
+✅ 완료 — moveit_calibration으로도 `joint6 -> camera_color_optical_frame`
+계산 성공, easy_handeye2 결과와 교차검증까지 마침. 두 도구 다 일관된
+결과를 주는 것을 확인했으므로 앞으로는 easy_handeye2 쪽(`mycobot_d435_eih`,
+`publish.launch.py`로 실시간 TF 유지)을 기본으로 계속 사용.
+
+---
+
 ## 다음 세션에서 이어갈 작업 (우선순위)
 
 1. YOLO+D435 → `/target_point` → `coord_to_goal_node` 전체 파이프라인 첫
@@ -745,3 +960,6 @@ Octomap Occupied Voxels가 정확히 맞는 것까지 육안으로 검증함 (�
 3. 그리퍼 URDF 추가 검토
 4. (병행 가능) SO-ARM101용 MoveIt2 구성 조사 — `Pavankv92/lerobot_ws` 확인,
    `coord_to_goal_node` 패턴을 SO-101 조인트/링크 이름으로 이식
+5. NVIDIA PRIME 오프로드 강제 적용이 RViz 카메라 디스플레이 SIGSEGV를
+   해결하는지 검증 (14장 트러블슈팅 4번, 아직 미검증 — 지금은
+   `rqt_image_view` 우회로 작업 중)

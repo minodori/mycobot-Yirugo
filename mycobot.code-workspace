@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "../roscamp-repo-1"
+		},
+		{
+			"path": "../moveit_calibration"
 		}
 	],
 	"settings": {
