@@ -39,6 +39,8 @@ MoveGroup 액션 경로를 쓰고(=spin_once 호출 코드 경로 자체를 안 
 처리함 (실행 중인 executor 하나만 스핀 담당).
 """
 
+import math
+
 from geometry_msgs.msg import Point, PointStamped, Pose
 from moveit_msgs.msg import AttachedCollisionObject, CollisionObject, PlanningScene
 from pymoveit2 import MoveIt2, MoveIt2State
@@ -68,6 +70,33 @@ JOINT_NAMES = [
 BASE_LINK_NAME = 'g_base'
 END_EFFECTOR_NAME = 'joint6_flange'
 GROUP_NAME = 'arm_group'
+
+# [방식 B, 2026-07-24] 목표 위치마다 "그리퍼가 목표 방향을 바라보는"
+# orientation을 매번 동적으로 계산함(look-at 방식). 고정 orientation(identity,
+# look-pose 값, `GRIPPER_ORIENTATION` 등)은 모두 위치별로 성공/실패가 갈려서
+# 작업공간 전체를 커버하지 못함이 확인됐음(6축 팔의 IK 특성상 자연스러운
+# 결과, docs/obstacle_avoidance_manual_test.md "알려진 문제" 참고).
+#
+# 그리퍼 "정면"(그리퍼가 물체를 향해 뻗어나가는 방향) 축 확정: `joint6_flange`의
+# 로컬 **+Z축**. 실물 팔을 움직여 실측하는 대신, URDF 링크체인(joint6_flange ->
+# gripper_base(고정 조인트, origin z=0.034) -> 손가락 링크들)으로 FK를 계산해
+# 손가락 중점이 flange 원점 기준 거의 순수한 로컬 +Z 방향(정규화 벡터
+# [0, -0.003, 0.99999], 거리 ~5.5cm)에 있음을 확인함(2026-07-24, 스크립트로
+# 검증). look pose 실측 쿼터니언(위 docstring, xyzw=[-0.538,0.482,-0.442,0.532])
+# 으로 교차검증해도 이 +Z축이 g_base 기준 [0.988,0.146,-0.043] 방향(대략
+# 로봇 앞쪽)을 가리켜 물리적으로도 합당함 — 기존
+# `GRIPPER_BOX_Z_OFFSET`(아래) 계산이 가정했던 축과 일치.
+#
+# `_compute_look_at_quat_xyzw()`가 이 forward(+Z)축을 목표 방향으로 정렬하는
+# 회전을 계산함. TF 조회 실패 등 예외 상황에서만 아래 고정값(look pose에서
+# 실측한 orientation)으로 폴백함.
+FALLBACK_APPROACH_QUAT_XYZW = [-0.538, 0.482, -0.442, 0.532]
+
+# look-at 계산에서 roll(정면 축 둘레 회전)을 고정하기 위한 기준 "up" 벡터
+# (g_base 기준 world +Z). 향후 AI Service가 토마토 기울기 정보를 주면 이
+# 값을 그 기울기 벡터로 교체할 예정(docs/obstacle_avoidance_manual_test.md
+# "향후 계획" 참고).
+WORLD_UP = (0.0, 0.0, 1.0)
 
 # 목표 지점보다 이만큼 로봇 쪽(x축 음의 방향)으로 당겨서 접근 (그리퍼 없음).
 # TARGET_OBJECT_RADIUS보다 커야 접근 위치가 우리가 등록한 구 자체와
@@ -104,6 +133,79 @@ GRIPPER_PUBLISH_RETRY_COUNT = 5
 GRIPPER_PUBLISH_RETRY_PERIOD_SEC = 2.0
 
 
+def _normalize(vec):
+    length = math.sqrt(sum(c * c for c in vec))
+    return [c / length for c in vec]
+
+
+def _cross(a, b):
+    return [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+
+
+def _dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _rotation_matrix_to_quat_xyzw(m):
+    """3x3 회전행렬(행 단위 리스트) -> 쿼터니언(xyzw). 표준 Shepperd's method."""
+    trace = m[0][0] + m[1][1] + m[2][2]
+    if trace > 0:
+        s = 0.5 / math.sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (m[2][1] - m[1][2]) * s
+        y = (m[0][2] - m[2][0]) * s
+        z = (m[1][0] - m[0][1]) * s
+    elif m[0][0] > m[1][1] and m[0][0] > m[2][2]:
+        s = 2.0 * math.sqrt(1.0 + m[0][0] - m[1][1] - m[2][2])
+        w = (m[2][1] - m[1][2]) / s
+        x = 0.25 * s
+        y = (m[0][1] + m[1][0]) / s
+        z = (m[0][2] + m[2][0]) / s
+    elif m[1][1] > m[2][2]:
+        s = 2.0 * math.sqrt(1.0 + m[1][1] - m[0][0] - m[2][2])
+        w = (m[0][2] - m[2][0]) / s
+        x = (m[0][1] + m[1][0]) / s
+        y = 0.25 * s
+        z = (m[1][2] + m[2][1]) / s
+    else:
+        s = 2.0 * math.sqrt(1.0 + m[2][2] - m[0][0] - m[1][1])
+        w = (m[1][0] - m[0][1]) / s
+        x = (m[0][2] + m[2][0]) / s
+        y = (m[1][2] + m[2][1]) / s
+        z = 0.25 * s
+    return [x, y, z, w]
+
+
+def _compute_look_at_quat_xyzw(forward_raw, world_up=WORLD_UP):
+    """그리퍼 로컬 +Z축(정면, 위 상수 설명 참고)이 `forward_raw` 방향을
+    향하도록 하는 orientation을 쿼터니언(xyzw)으로 계산 (그래픽스 look-at
+    행렬과 같은 원리). `world_up`은 정면 축 둘레 회전(roll)만 고정하는 기준
+    벡터 — forward와 거의 평행하면(90도 인근 목표 등) 대체 기준축으로
+    degenerate를 피함.
+    """
+    forward = _normalize(forward_raw)
+
+    up_ref = list(world_up)
+    if abs(_dot(forward, up_ref)) > 0.99:
+        up_ref = [1.0, 0.0, 0.0]
+
+    right = _normalize(_cross(up_ref, forward))
+    up = _cross(forward, right)
+
+    # 회전행렬의 각 열(column) = 로컬 X/Y/Z축이 base(g_base) 좌표계에서
+    # 가리키는 방향. 로컬 X=right, 로컬 Y=up, 로컬 Z=forward(그리퍼 정면)로 배정.
+    rotation_matrix = [
+        [right[0], up[0], forward[0]],
+        [right[1], up[1], forward[1]],
+        [right[2], up[2], forward[2]],
+    ]
+    return _rotation_matrix_to_quat_xyzw(rotation_matrix)
+
+
 class CoordToGoalNode(Node):
 
     def __init__(self):
@@ -132,6 +234,7 @@ class CoordToGoalNode(Node):
         self._completion_timer = None
         self._clear_timer = None
         self._pending_approach_position = None
+        self._pending_target_position = None
 
         # 목표 지점에 CollisionObject(구)를 등록해 Octomap이 그 자리 실제
         # 물체(토마토)를 자기 필터로 걸러내도록 함 (위 모듈 docstring 참고).
@@ -195,6 +298,7 @@ class CoordToGoalNode(Node):
         self._busy = True
         self._publish_target_collision_object(target)
         self._pending_approach_position = approach_position
+        self._pending_target_position = [target.x, target.y, target.z]
         self.get_logger().info(
             f'목표 지점({target.x:.3f}, {target.y:.3f}, {target.z:.3f})에 '
             f'Octomap 클리어용 구 등록, {OCTOMAP_CLEAR_DELAY_SEC}초 대기 후 플래닝 시작'
@@ -264,6 +368,42 @@ class CoordToGoalNode(Node):
         scene.world.collision_objects = [collision_object]
         self._planning_scene_publisher.publish(scene)
 
+    def _compute_approach_quat(self, target_position):
+        """현재 end-effector 위치 -> 목표 위치 방향을 그리퍼 정면(로컬 +Z)이
+        바라보도록 하는 orientation을 동적으로 계산(방식 B). 현재 위치 TF
+        조회 실패 시(예: 아직 joint_states가 안 들어온 경우) 안전하게 look
+        pose 실측값으로 폴백함.
+        """
+        try:
+            ee_transform = self._tf_buffer.lookup_transform(
+                BASE_LINK_NAME,
+                END_EFFECTOR_NAME,
+                Time(),
+                timeout=Duration(seconds=1.0),
+            )
+        except (
+            tf2_ros.LookupException,
+            tf2_ros.ConnectivityException,
+            tf2_ros.ExtrapolationException,
+        ) as exc:
+            self.get_logger().warn(
+                f'현재 EE 위치 TF 조회 실패, 고정 orientation으로 폴백: {exc}'
+            )
+            return FALLBACK_APPROACH_QUAT_XYZW
+
+        ee_translation = ee_transform.transform.translation
+        ee_position = [ee_translation.x, ee_translation.y, ee_translation.z]
+        forward = [t - e for t, e in zip(target_position, ee_position)]
+
+        if math.sqrt(sum(c * c for c in forward)) < 1e-6:
+            self.get_logger().warn(
+                '목표가 현재 EE 위치와 거의 같아 forward 벡터가 degenerate함, '
+                '고정 orientation으로 폴백'
+            )
+            return FALLBACK_APPROACH_QUAT_XYZW
+
+        return _compute_look_at_quat_xyzw(forward)
+
     def _start_planning(self) -> None:
         self._clear_timer.cancel()
         self._clear_timer = None
@@ -272,13 +412,22 @@ class CoordToGoalNode(Node):
             self._clear_octomap_client.call_async(Empty.Request())
 
         approach_position = self._pending_approach_position
-        approach_quat = [0.0, 0.0, 0.0, 1.0]  # TODO: 접근 방향에 맞는 orientation 필요
+        approach_quat = self._compute_approach_quat(self._pending_target_position)
 
-        self.get_logger().info(f'목표 위치로 플래닝: {approach_position}')
+        self.get_logger().info(
+            f'목표 위치로 플래닝: {approach_position}, orientation(xyzw): '
+            f'{[round(c, 3) for c in approach_quat]}'
+        )
+        # tolerance 기본값(0.001/0.001)은 IK가 이 정확한 위치+방향을 동시에
+        # 만족하는 해를 못 찾는 경우가 많아(OMPL이 짧은 시간 안에 못 찾음),
+        # orientation은 넉넉히 풀어줌 — 위치는 정확히, 방향은 근사치면 충분한
+        # 접근(pregrasp) 자세이므로 문제 없음(이번 세션 테스트로 확인).
         self._moveit2.move_to_pose(
             position=approach_position,
             quat_xyzw=approach_quat,
             cartesian=False,
+            tolerance_position=0.005,
+            tolerance_orientation=0.5,
         )
         # wait_until_executed()는 내부적으로 rclpy.spin_once()를 호출해서 이미
         # 돌고 있는 MultiThreadedExecutor와 충돌하므로 쓰지 않음. 대신 같은
