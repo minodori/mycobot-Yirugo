@@ -116,6 +116,14 @@ TARGET_OBJECT_ID = 'target_object'
 # 살짝 길게 잡음).
 OCTOMAP_CLEAR_DELAY_SEC = 1.2
 
+# pymoveit2 기본값(allowed_planning_time=0.5s, num_planning_attempts=5)은 OMPL
+# 목표 샘플링이 확률적이라(같은 위치/orientation이어도 시도마다 성공/실패가
+# 갈림, 2026-07-24 실물 스택 테스트로 확인) IK 여유가 좁은 목표에서 자주
+# "Unable to sample any valid states for goal tree"로 실패함. 여유를 늘려
+# 재시도 확률을 높임.
+PLANNING_TIME_SEC = 3.0
+PLANNING_ATTEMPTS = 10
+
 # ---- 그리퍼 임시 충돌 형상 (URDF에 아직 그리퍼가 없어서, 실제 그리퍼가
 # 카메라 바로 앞(~13~21cm)에서 자기 몸 필터 없이 그대로 장애물로 잡히는 문제
 # 우회용) ----
@@ -225,6 +233,8 @@ class CoordToGoalNode(Node):
             # 이 노드를 이미 spin 중인 MultiThreadedExecutor와 충돌함.
             use_move_group_action=True,
         )
+        self._moveit2.allowed_planning_time = PLANNING_TIME_SEC
+        self._moveit2.num_planning_attempts = PLANNING_ATTEMPTS
 
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)

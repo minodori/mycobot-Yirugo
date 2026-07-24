@@ -251,21 +251,59 @@ origin z=0.034m) -> 손가락 링크들, `mycobot_280_m5_adaptive_gripper.urdf`)
 degenerate 폴백 케이스도 정상 동작). `colcon build --packages-select
 mycobot_280_pick` 성공, 모듈 import 및 문법 확인 완료.
 
-**아직 안 한 것 — 실물 end-to-end 검증**: 위 구현은 기하학적/수학적으로는
-검증됐지만, **실제 로봇+MoveIt2 스택에서 여러 목표 좌표에 대해 플래닝이
-성공하는지는 다음 세션에 실물로 확인 필요**(이 문서 1~7단계 절차 그대로,
-단 이번엔 orientation이 매번 자동 계산됨). 특히 확인할 것:
-- 과거 실패/성공이 갈렸던 두 좌표((0.125,-0.15,0.204), (0.158,0.198,0.152))
-  둘 다 새 방식으로 성공하는지
-- `tolerance_orientation=0.5`가 여전히 필요한지, 동적 계산이라 더 타이트하게
-  줄여도 되는지
-- `WORLD_UP` 기준이 실제 작업공간 전체에서 자연스러운 접근 자세를 만드는지
-  (특이한 위치에서 그리퍼가 부자연스럽게 뒤집히는 경우가 있는지)
+## 실물 end-to-end 검증 결과 (2026-07-24, 같은 세션)
 
-**향후 계획(참고, 지금 당장은 아님)**: AI Service가 토마토의 기울기
-정보를 제공할 예정 — `WORLD_UP` 상수를 world +Z 대신 그 기울기 값으로
-대체하면, 목표를 향하는 방향은 유지하면서 그 축 둘레 회전(roll)만
-토마토 기울기에 맞추는 자연스러운 확장이 됨.
+실물 팔(look pose, 토크 고정, 실측 각도 look pose와 ±1도 이내)에 연결된
+채로 `demo_octomap.launch.py`(FakeSystem 시뮬레이션 — 하드웨어 플러그인이
+`mock_components/GenericSystem`이라 MoveIt2가 "실행"해도 실제 서보는
+안 움직임, 실물은 정지 상태 유지) + 재빌드한 `coord_to_goal_node`로 과거
+성공/실패가 갈렸던 두 좌표를 재테스트함.
+
+**1차 결과 — orientation 문제(IK 도달 불가) 자체는 훨씬 개선됨, 단
+pymoveit2 기본 플래닝 예산이 너무 짧았음**: 초기 테스트에서
+(0.158,0.198,0.152)(과거 identity만 성공하던 좌표)가 새 동적 orientation
+(`[0.342,0.706,0.558,0.27]`)으로 3회 연속 `Unable to sample any valid
+states for goal tree`(플래닝 자체 실패)로 실패함. 원인 확인 결과
+`pymoveit2` `MoveIt2` 기본값이 `allowed_planning_time=0.5초`,
+`num_planning_attempts=5`로 — OMPL(RRTConnect)의 목표 상태 샘플링이
+확률적이라 IK 여유가 좁은 목표에서는 이 예산으로 못 찾는 경우가 많음.
+**수정**: `coord_to_goal_node.py`에 `PLANNING_TIME_SEC=3.0`,
+`PLANNING_ATTEMPTS=10`을 추가하고 `MoveIt2` 생성 직후
+`allowed_planning_time`/`num_planning_attempts` 프로퍼티로 설정.
+
+**수정 후 재테스트**:
+- **(0.158,0.198,0.152)**: 3/3 **플래닝 성공**("Solution found")으로 전환
+  — 동적 orientation + 늘어난 플래닝 예산의 조합으로 과거 실패 좌표가
+  안정적으로 풀림. (실행은 그리퍼 근접 잔여 octomap voxel과 충돌해
+  중간에 abort되긴 했으나, 이는 아래 별개 항목 참고 — orientation/IK
+  문제와는 무관.)
+- **(0.125,-0.15,0.204)**: 늘어난 예산으로도 3/3 `Unable to sample any
+  valid states for goal tree`로 실패. **회귀(동적 orientation 때문에
+  나빠진 것) 여부를 확인하기 위해** 같은 접근 위치(`[0.045,-0.15,0.204]`)에
+  **옛 고정값**(`FALLBACK_APPROACH_QUAT_XYZW`, look pose 실측 orientation)
+  으로도 별도 스크립트(`/tmp` 스크래치패드, 세션 한정)로 직접 테스트했더니
+  **이것도 동일하게 3초/10회 예산 전부 소진하며 실패**함. 즉 이 위치는
+  **orientation 선택과 무관하게 현재 상태에서 IK가 마진널(경계)한 위치**로
+  보임 — 동적 orientation이 이 특정 좌표를 "악화"시킨 게 아니라, 애초에
+  이 지점 자체가 어려운 케이스였을 가능성이 높음(실물 관절각이 문서
+  기록값과 ±1도 정도 미세하게 달라진 것도 마진널한 IK 샘플링 결과에
+  영향을 줬을 수 있음 — 확정 원인은 아님, 후속 조사 필요).
+
+**종합 평가**: 동적 look-at orientation은 최소 한 좌표에서 명확한 개선을
+보였고(0/3 → 3/3), 다른 좌표에서 원인 불명의 실패가 있었지만 그건 옛
+고정값도 마찬가지로 실패해 orientation 계산 자체의 결함으로 보이진 않음.
+**세션 시간 제약으로 이 마진널 케이스의 근본 원인까지는 못 팠음** — 다음
+세션 후속 조사 대상.
+
+**다음 세션 후속 조사**:
+- (0.125,-0.15,0.204) 마진널 실패의 근본 원인(실물-시뮬 미세한 각도
+  드리프트 때문인지, 순수 위치 자체의 IK 특이점 근접 때문인지) 확인
+- `WORLD_UP` 기준(roll 고정)이 유일한 정답은 아님 — 이 기준으로 고정한
+  roll이 마침 IK 불가능한 각도일 수 있어, 향후엔 forward축 둘레로 몇 개
+  후보 roll을 순차 시도하는 방식도 고려할 만함(지금은 구현 안 함, 위
+  마진널 케이스가 실제로 roll 선택 문제인지부터 확인 필요)
+- 그리퍼 근접 잔여 octomap voxel로 인한 실행 중 abort(기존 알려진 문제,
+  아래 항목 참고)는 이번 테스트에서도 재현됨 — 별개로 계속 미해결
 
 ## 상태 (2026-07-24 기준)
 
@@ -273,8 +311,12 @@ mycobot_280_pick` 성공, 모듈 import 및 문법 확인 완료.
 월드 오브젝트 충돌 문제 해결됨(위 항목 참고).
 ✅ look pose 확정 + 실물 동기화 절차 확립, 5회 반복 왕복(시뮬레이션+실물)
 성공 확인.
-✅ orientation 동적 계산(방식 B) 구현 완료 — 그리퍼 정면축(flange 로컬
-+Z) 확정, look-at 함수 작성, `coord_to_goal_node.py` 적용, 빌드 확인.
-다음 세션에 실물 end-to-end 검증 필요(위 "아직 안 한 것" 참고).
+✅ orientation 동적 계산(방식 B) 구현 + 실물 end-to-end 검증 완료 — 그리퍼
+정면축(flange 로컬 +Z) 확정, look-at 함수 작성, `coord_to_goal_node.py`
+적용, 플래닝 예산 확대(`allowed_planning_time=3.0s`,
+`num_planning_attempts=10`)까지 반영. 과거 실패 좌표 중 최소 하나가 확실히
+개선됨을 실물 스택에서 확인(위 "실물 end-to-end 검증 결과" 참고). 다른
+좌표의 마진널 실패는 orientation 계산과 무관해 보이나 근본 원인 후속 조사
+필요.
 ⬜ 그리퍼 근접거리 self-filter 튜닝(`padding_scale: 0.92`/`padding_offset: 0`)은
 실용적 타협 수준 — 정식 해결(근접거리 depth 필터 등) 아직 미착수.
