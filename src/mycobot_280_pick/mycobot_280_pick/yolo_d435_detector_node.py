@@ -18,6 +18,22 @@ Octomap과 YOLO 검출이 카메라 하나를 공유해서 동시에 동작함.
     맞췄으므로 두 이미지 다 이 프레임 기준).
   - point: 위 프레임 기준 3D 좌표 (m 단위)
 
+발행: tomato_boxes (std_msgs/msg/Float32MultiArray) — 이번 추론에서 검출된
+"모든" bbox(클래스/ripe 여부 무관, [x1,y1,x2,y2, x1,y1,x2,y2, ...] 평탄화된
+컬러 이미지 픽셀 좌표)를 target_point와 같은 추론 결과에서 같이 발행함
+(추론을 두 번 돌리지 않음). pointcloud_tomato_filter_node가 이 bbox로
+raw pointcloud에서 토마토 영역 포인트를 제거해 Octomap이 토마토 자체를
+장애물로 잡지 않게 함(로드맵 2단계, docs/obstacle_avoidance_manual_test.md
+참고). 이 모델은 토마토 상태 4클래스만 검출하도록 학습됐으므로 클래스
+구분 없이 검출된 박스 전부가 "토마토"로 간주해도 됨.
+
+발행: tomato_detections_image (sensor_msgs/msg/Image) — 이번 추론 결과에
+bbox/클래스명/confidence를 그려 넣은 컬러 이미지(ultralytics
+`Results.plot()`). RViz에 Image 디스플레이로 추가해서 YOLO가 실제로 무엇을
+어떤 클래스로 검출했는지(또는 아예 못 했는지) 육안 디버깅하는 용도 —
+`/target_point`/`/tomato_boxes`는 숫자만 나와서 "검출은 됐는데 좌표가
+이상한지" vs "애초에 검출 자체가 안 됐는지" 구분이 안 됐던 문제 해결.
+
 캘리브레이션(로드맵 3단계, docs 13장)이 이미 끝나 있어서 이 frame_id ->
 g_base로 가는 TF가 실시간으로 존재함 — coord_to_goal_node가 코드 수정 없이
 그대로 TF2 변환해서 실제 로봇을 움직임.
@@ -56,6 +72,7 @@ import message_filters
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import Float32MultiArray
 from ultralytics import YOLO
 
 TARGET_CLASS_NAME = 'ripe'
@@ -104,6 +121,12 @@ class YoloD435DetectorNode(Node):
         self._last_publish_time = 0.0
 
         self._publisher = self.create_publisher(PointStamped, 'target_point', 10)
+        self._boxes_publisher = self.create_publisher(
+            Float32MultiArray, 'tomato_boxes', 10
+        )
+        self._annotated_image_publisher = self.create_publisher(
+            Image, 'tomato_detections_image', 10
+        )
 
         self._camera_info_sub = self.create_subscription(
             CameraInfo, camera_info_topic, self._on_camera_info, 10
@@ -122,6 +145,28 @@ class YoloD435DetectorNode(Node):
             f'color={color_topic}, depth={depth_topic}'
         )
 
+    def _publish_tomato_boxes(self, result) -> None:
+        """검출된 모든 bbox(클래스 무관)를 [x1,y1,x2,y2, ...] 평탄화해 발행.
+
+        result.boxes가 비어있어도(이번 프레임에 검출 없음) 빈 배열을
+        발행함 — pointcloud_tomato_filter_node가 이전 프레임의 마스크를
+        계속 유지하지 않고 제때 해제하도록 함.
+        """
+        flat = []
+        if result.boxes is not None:
+            for box in result.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                flat.extend([x1, y1, x2, y2])
+        msg = Float32MultiArray()
+        msg.data = flat
+        self._boxes_publisher.publish(msg)
+
+    def _publish_annotated_image(self, result, header) -> None:
+        annotated = result.plot()  # bbox/클래스명/confidence가 그려진 BGR 이미지
+        image_msg = self._bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
+        image_msg.header = header
+        self._annotated_image_publisher.publish(image_msg)
+
     def _on_camera_info(self, msg: CameraInfo) -> None:
         self._intrinsics = (msg.k[0], msg.k[4], msg.k[2], msg.k[5])
         self._frame_id = msg.header.frame_id
@@ -139,6 +184,8 @@ class YoloD435DetectorNode(Node):
         )
 
         result = self._model.predict(image, conf=CONFIDENCE_THRESHOLD, verbose=False)[0]
+        self._publish_tomato_boxes(result)
+        self._publish_annotated_image(result, color_msg.header)
         if result.boxes is None or len(result.boxes) == 0:
             return
 

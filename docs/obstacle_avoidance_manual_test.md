@@ -5,6 +5,46 @@
 수동으로 확인하는 절차. `docs/look_pose.md`, `docs/handeye_calibration.md`와
 이어지는 내용.
 
+## 다음 세션 시작 안내 (2026-07-24 세션 종료 시점)
+
+### 이번 세션에 완료된 것
+- **Pointcloud 사전 필터링(로드맵 2단계) 구현 + 실물 검증 완료** — YOLO bbox로
+  토마토 영역을 depth 단계에서 사전 제거해 Octomap이 토마토를 장애물로 안
+  잡게 함. 신규 `pointcloud_tomato_filter_node.py`(`mycobot_280_pick`) +
+  `yolo_d435_detector_node.py` 확장(`tomato_boxes`, `tomato_detections_image`
+  발행). 개발 중 버그 2개 발견+수정(아래 "Pointcloud 사전 필터링" 절과 그
+  하위 절 참고):
+  1. raw pointcloud(depth 센서 그리드) vs 컬러 bbox 그리드 불일치 →
+     `aligned_depth_to_color` 기반 자체 디프로젝션으로 재작성.
+  2. 출력 topic QoS(BEST_EFFORT) vs occupancy_map_monitor 요구(RELIABLE)
+     불일치 → 기본 QoS로 수정.
+  수정 후 `bbox_padding_ratio`를 키워가며 실물 D435 + RViz로 토마토 위치에
+  Octomap 구멍이 실제로 생기는 것 육안 확인함.
+- 디버깅용 시각화 2개 추가: `tomato_detections_image`(YOLO bbox/클래스/
+  confidence 그린 이미지, RViz Image 디스플레이용), `/debug_tomato_point`
+  발행 + RViz Point 디스플레이로 특정 좌표 위치 육안 확인하는 절차.
+
+### 다음 세션에 할 일 — 우선순위
+1. **그리퍼 근접거리 self-filter 재평가** (남은 작업 우선순위 2번): pointcloud
+   사전 필터링이 실물 검증됐으니, `sensors_3d.yaml`의 `padding_scale: 0.92`
+   타협이 지금도 필요한지, 잔여 voxel 문제가 줄었는지 재확인.
+2. **IK 마진널 실패 조사** (로드맵 3번, 급하지 않음): 이번 세션에 g_base
+   [0.219,0.054,0.311] 근처 좌표에서 `Unable to sample any valid states for
+   goal tree`(플래닝 자체 실패, orientation 무관)가 재현됨 — 지난 세션
+   (0.125,-0.15,0.204)와 같은 부류. 근본 원인(실물-시뮬 미세 드리프트 vs
+   순수 위치의 IK 특이점) 미확인. 아래 "새로운 위치에서도 ... 재현" 절 참고.
+3. `bbox_padding_ratio` 최종값 확정 — 세션 종료 시점 `DEFAULT_BBOX_PADDING_RATIO
+   = 0.5`(실물 조정 중, 0.2 기본값은 파일에 주석으로 남겨둠). 더 튜닝하거나
+   확정할 것.
+4. 이후 원래 로드맵(카메라 감지 → 좌표 계산 → 장애물 회피 플래닝 → 실물
+   이동 전체 파이프라인 완성) 계속 진행, 완성되면 automato_ws로 포팅
+   (사용자 확인된 방침, 다시 묻지 말 것).
+
+### 참고
+- 커밋은 요청 시에만.
+- RPi `sync_plan`은 실물 이동 테스트 아닐 땐 꺼둔 채로 두는 게 안전(이번
+  세션 종료 시점 꺼짐 상태).
+
 ## 사전 조건
 
 - 실물 팔이 **look pose**(`docs/look_pose.md`, `[-2.98, 104.41, -31.81, -76.2, 10.54, 7.03]` 도, 혹은 그 이후 조정한 값)에 **토크 걸린 채 고정**돼 있어야
@@ -305,6 +345,194 @@ states for goal tree`(플래닝 자체 실패)로 실패함. 원인 확인 결�
 - 그리퍼 근접 잔여 octomap voxel로 인한 실행 중 abort(기존 알려진 문제,
   아래 항목 참고)는 이번 테스트에서도 재현됨 — 별개로 계속 미해결
 
+## Pointcloud 사전 필터링 (로드맵 2단계, 2026-07-24 구현)
+
+**배경**: 위 "알려진 문제"의 `START_STATE_IN_COLLISION` 계열은 전부 "카메라가
+실제 물체(토마토, 자기 그리퍼)를 depth로 보고 Octomap이 장애물로 찍은
+것"에서 파생됨. 지금까지 대응은 전부 **사후 대응**이었음 — 목표 지점에
+sphere CollisionObject를 등록해 그 자리만 필터되게 유도(`coord_to_goal_node`)
+하거나, 플래닝 직전 `/clear_octomap`을 호출해 통째로 비우거나
+(`padding_scale` 타협). 둘 다 타이밍/범위 의존적인 임시방편이라 잔여 voxel
+문제가 계속 재발함.
+
+**근본 대응**: YOLO 검출 bbox로 depth pointcloud 자체에서 토마토 영역
+포인트를 사전에 제거(NaN 처리)해서, 목표든 아니든 검출된 토마토가 애초에
+Octomap에 장애물로 등록되지 않게 함.
+
+**구현** (`mycobot_280_pick` 패키지):
+1. `yolo_d435_detector_node.py`: 기존 YOLO 추론 결과(1회, 추가 추론 없음)에서
+   검출된 **모든** bbox(클래스/ripe 여부 무관 — 이 모델은 토마토 상태
+   4클래스만 검출하므로 전부 "토마토")를 `[x1,y1,x2,y2, ...]` 평탄화해
+   `tomato_boxes`(`std_msgs/msg/Float32MultiArray`)에 추가로 발행. 검출이
+   없는 프레임에도 빈 배열을 발행해 필터 노드의 마스크가 제때 풀리게 함.
+2. **신규** `pointcloud_tomato_filter_node.py`: `tomato_boxes` +
+   `aligned_depth_to_color`(image_raw + camera_info)를 구독해, bbox 픽셀
+   영역의 depth를 NaN 처리한 뒤 픽셀->3D 변환(핀홀 근사, `yolo_d435_detector_node`와
+   같은 공식)을 스스로 수행해 `/camera/camera/depth/color/points_filtered`에
+   발행. (아래 "raw pointcloud 그리드 불일치 버그" 참고 — 최초 구현은 realsense
+   raw pointcloud를 그대로 썼다가 실패해서 이 방식으로 교체함.) bbox가
+   없으면(`tomato_boxes` 미수신) 마스킹 없는 pointcloud를 그대로 발행.
+3. `sensors_3d.yaml`의 `point_cloud_topic`을 raw 토픽에서
+   `.../points_filtered`로 변경 — occupancy_map_monitor가 필터링된
+   pointcloud만 보게 됨.
+4. `demo_octomap.launch.py`: `pointcloud_tomato_filter_node`를 항상 같이
+   띄우도록 추가(YOLO 노드가 없어도 안전하게 마스킹 없는 pointcloud를 그대로
+   발행).
+
+⚠️ **`sensors_3d.yaml`/`demo_octomap.launch.py`는 `src/mycobot_ros2/`
+(gitignore된 vendor clone) 안에 있어서 git으로 안 잡힘** — 재클론/재vendoring
+시 이 절 내용을 참고해서 다시 적용할 것 (`initial_positions.yaml`과 같은
+패턴, 이 문서 맨 위 "사전 조건" 참고).
+
+### raw pointcloud 그리드 불일치 버그 — 발견 + 수정 (2026-07-24, 같은 세션)
+
+**증상**: 첫 구현(`pointcloud.ordered_pc:=true`로 받은 realsense raw
+pointcloud `/camera/camera/depth/color/points`를 그대로 구독해 YOLO bbox
+픽셀 좌표를 그 그리드에 직접 적용)을 실물로 띄워보니, `/tomato_boxes`와
+`/camera/camera/depth/color/points_filtered`는 정상 발행되는데(각각
+`ros2 topic echo`/`hz`로 확인) **RViz Octomap에서 토마토 위치에 구멍이 전혀
+안 생김**.
+
+**원인**: `ros2 topic echo /camera/camera/depth/color/points --field header`로
+확인한 결과 `frame_id: camera_depth_optical_frame`— 이 pointcloud는 **depth
+센서 고유의 픽셀 그리드**를 따름(컬러 텍스처는 별도 재투영으로 입혀지지만
+그리드 자체는 depth 원본 해상도/광학중심 기준이고, `align_depth.enable`을
+켜도 이 pointcloud 생성 경로 자체는 안 바뀜). 반면 YOLO bbox는 컬러 이미지
+픽셀 좌표. 두 그리드는 해상도 숫자(640x480)만 우연히 같을 뿐 광학중심/FOV가
+다른 별개 좌표계라서, bbox를 그대로 적용하면 엉뚱한 픽셀이 마스킹되고
+실제 토마토 위치는 그대로 남음. `yolo_d435_detector_node`가 애초에 raw
+depth 대신 `aligned_depth_to_color`를 쓰는 이유가 정확히 이 정렬 문제
+때문인데(그 모듈 상단 주석에 이미 있었음), 필터 노드를 새로 만들 때 이
+교훈을 놓쳤던 것.
+
+**수정**: `pointcloud_tomato_filter_node`가 realsense pointcloud를 아예
+구독하지 않고, `yolo_d435_detector_node`와 똑같이
+`aligned_depth_to_color`(image_raw + camera_info)를 직접 구독해서 픽셀->3D
+변환(핀홀 근사, 왜곡 무시 — 같은 근거로 yolo 노드도 무시함)을 스스로
+수행하도록 재작성함. bbox 마스킹과 pointcloud 생성이 완전히 같은 픽셀
+그리드(컬러 프레임에 정렬된 depth) 위에서 이뤄지므로 그리드 불일치가
+구조적으로 불가능해짐. 이에 따라 `demo_octomap.launch.py`의
+`pointcloud.ordered_pc:=true` 인자도 더 이상 필요 없어져 제거함(원래 목적이
+raw pointcloud를 organized로 받기 위함이었는데, 이제 그 raw pointcloud
+자체를 안 씀). `package.xml`의 `sensor_msgs_py` 의존성도 더 이상 안 써서
+제거.
+
+**단위 테스트(세션 한정 스크래치패드, 하드웨어 없이 검증, 수정 후 버전
+기준)**: 4x4 합성 depth 이미지(픽셀마다 다른 depth값 인코딩 + 사전 존재하는
+무효(0) 픽셀 1개 포함)로 (1) bbox 영역이 정확히 NaN 처리되고 나머지 픽셀은
+핀홀 공식으로 정확한 x/y/z가 나오는지, (2) 원본 depth 메시지의
+`frame_id`(color-aligned 프레임)가 출력에 그대로 유지되는지, (3) bbox가
+없으면 마스킹 없이(사전 무효 픽셀만 NaN인 채로) 전체 발행하는지, (4)
+camera_info를 아직 못 받았으면 아예 발행하지 않는지(intrinsics 없이 잘못된
+좌표 발행 방지) 각각 assert로 확인 — 전부 통과. `yolo_d435_detector_node`의
+`_publish_tomato_boxes`도 mock `Result`(빈 리스트/`None`/복수 박스)로 평탄화
+로직만 별도 검증 — 전부 통과. `colcon build --packages-select
+mycobot_280_pick` 성공, `ament_flake8`/`ament_pep257`은 이 패키지 전체가
+이미 갖고 있던 것과 동일한 종류의 pre-existing 스타일 경고(D205/D400)만
+있고 새 회귀 없음.
+
+**디버깅용 시각화 추가**: 실물 재검증 중 "Octomap에 구멍이 안 생김"이
+관측됐을 때 그 원인이 (a) 필터링 버그인지 (b) YOLO가 애초에 그 토마토를
+검출/분류 못한 것인지 구분이 안 되는 문제가 있었음(`/target_point`,
+`/tomato_boxes`는 숫자만 나와 육안 디버깅 불가). 그래서
+`yolo_d435_detector_node`에 `tomato_detections_image`
+(`sensor_msgs/msg/Image`, ultralytics `Results.plot()`로 bbox/클래스명/
+confidence를 그린 컬러 이미지) 발행을 추가함. RViz에서 Image 디스플레이를
+추가하고 토픽을 이걸로 설정하면 YOLO가 실제로 무엇을 어떤 클래스로
+검출했는지 바로 확인 가능.
+
+**미검증 (다음 세션 실물 재확인 필요)**:
+- 수정된 버전으로 실제 D435를 다시 띄워서 RViz Octomap에 토마토 위치 구멍이
+  실제로 생기는지 육안 확인(이번 세션엔 위 버그 발견까지만 하고 코드
+  수정/단위테스트로 끝남 — 실물 재검증은 다음 차례).
+- `tomato_detections_image`로 YOLO가 수확 대상 토마토를 실제로 검출/분류
+  하는지부터 확인(작아서 못 잡거나 'ripe'가 아닌 다른 클래스로 분류될
+  가능성 있음 — 이번 세션 사용자 관찰).
+
+**bbox 패딩 추가(2026-07-24, 같은 세션)**: 실물 테스트에서 토마토가 작아서
+Octomap 반영 여부를 육안으로 판단하기 애매하다는 관찰이 있었음. bbox
+자체는 물체 경계에 딱 맞게(타이트) 잡히는 경우가 많고, depth-color
+정렬에도 픽셀 단위 슬랙이 있을 수 있어, bbox를 그대로만 마스킹하면
+테두리 voxel이 안 지워지고 남을 위험이 있음. `pointcloud_tomato_filter_node`에
+`bbox_padding_ratio` 파라미터(기본값 0.2 = 각 변 20% 확장, 노드 실행 시
+`--ros-args -p bbox_padding_ratio:=<값>`로 조정 가능)를 추가해 bbox를
+비율만큼 바깥으로 확장해서 마스킹하도록 함. 비율 기반이라 거리가 멀어져
+bbox가 작아져도 상대적 여유가 유지됨. 합성 데이터로 패딩 확장 범위가
+정확한지(원본 bbox보다 넓고, 패딩 전에는 안 지워졌을 테두리 픽셀이 실제로
+지워지는지) 단위 테스트로 검증 — 통과. `colcon build` 성공.
+- 이 필터링이 실제로 적용된 뒤에도 그리퍼 근접 잔여 voxel
+  (`padding_scale: 0.92` 타협) 문제가 얼마나 줄어드는지 재평가 — 남은 작업
+  우선순위 2번("그리퍼 근접거리 self-filter 재평가")은 이 검증 이후 진행할 것.
+- `filtered_cloud_topic: filtered_cloud`(occupancy_map_monitor 자체 self-filter
+  출력, 이번 변경과 별개)와 새 `points_filtered` 토픽명이 혼동되지 않는지
+  RViz 토픽 목록에서 확인.
+
+### QoS 불일치 버그 — 발견 + 수정 (2026-07-24, 같은 세션)
+
+**증상**: 패딩 파라미터 테스트 중 `pointcloud_tomato_filter_node` 실행 시
+`New subscription discovered on topic '.../points_filtered', requesting
+incompatible QoS. No messages will be sent to it. Last incompatible policy:
+RELIABILITY` 경고 발생 — occupancy_map_monitor가 이 토픽에 구독은 했지만
+메시지를 전혀 못 받는 상태였음.
+
+**원인**: 출력 publisher를 `qos_profile_sensor_data`(BEST_EFFORT)로 만들었는데,
+`occupancy_map_monitor`(MoveIt `PointCloudOctomapUpdater`)는 이 토픽을
+RELIABLE로 구독 요청함. BEST_EFFORT 발행자는 RELIABLE 구독자를 만족 못 시켜서
+(QoS 호환성 규칙상 구독자가 요구하는 신뢰성 수준이 발행자보다 높으면
+비호환) 메시지가 전달 안 됨. (raw 카메라 토픽이 RELIABLE로 발행되는 걸
+`ros2 topic info --verbose`로 확인했었는데, 그때는 "필터 노드가 구독하는
+입력" QoS 얘기였고, 이번에 문제가 된 건 반대로 "필터 노드가 발행하는 출력"
+QoS라 별개로 다시 확인이 필요했던 것.)
+
+**수정**: 출력 publisher를 기본 QoS(reliable, keep-last depth 10)로 변경.
+`pointcloud_tomato_filter_node.py`에서 `qos_profile_sensor_data` import 및
+사용 제거.
+
+**교훈**: 이 프로젝트에서 실물 D435/occupancy_map_monitor와 연동하는 새
+토픽을 만들 때는 입력/출력 양쪽 QoS를 각각 `ros2 topic info <토픽> --verbose`로
+확인할 것 — "카메라 쪽은 보통 best-effort"라는 가정만으로 반대쪽(MoveIt
+내부 구독자)까지 넘겨짚으면 틀릴 수 있음.
+
+### 실물 재검증 결과 — pointcloud 사전 필터링 동작 확인 (2026-07-24, 같은 세션)
+
+위 두 수정(그리드 정렬 버그, QoS 버그) 이후 실물 D435 + RViz로 재검증:
+- `bbox_padding_ratio`를 기본 0.2에서 점차 키워보며(0.4 → 1.0 → 0.5 순으로
+  실물에서 직접 조정) 테스트한 결과, **패딩을 충분히 키우자 RViz Octomap에서
+  토마토 위치에 실제로 구멍이 생기는 것을 육안으로 확인함** — 사전 필터링이
+  의도대로 동작함. 최종 채택 값은 사용자가 실물로 조정 중(현재 파일 내
+  `DEFAULT_BBOX_PADDING_RATIO = 0.5`, `# DEFAULT_BBOX_PADDING_RATIO = 0.2`는
+  주석으로 남겨둠 — 필요시 되돌릴 수 있게).
+- 검출 좌표 육안 검증 절차 확립: `/target_point`로 나온 카메라 프레임 좌표를
+  별도 디버그 토픽(`/debug_tomato_point`, `geometry_msgs/msg/PointStamped`)에
+  발행하고 RViz에 **Point** 디스플레이(반경 조절 가능)로 추가하면, TF를 통해
+  Fixed Frame으로 변환된 위치가 Octomap 구멍과 일치하는지 바로 비교 가능
+  (`/target_point`로 직접 보내면 `coord_to_goal_node`가 떠 있을 때 실제
+  플래닝이 트리거될 수 있어 별도 토픽 사용 권장).
+- Octomap은 새 프레임이 "이전에 이미 점유된 voxel"을 능동적으로 지우지
+  않는다는 점(위 배경 설명 참고)이 실물 테스트에서도 재확인됨 — 패딩 값을
+  바꾼 뒤에는 반드시 `/clear_octomap` 호출 후 재축적해서 비교해야 정확한
+  before/after가 보임.
+
+**결론**: pointcloud 사전 필터링(로드맵 2단계)은 실물에서 동작 확인 완료.
+
+### 참고: 새로운 위치에서도 "Unable to sample any valid states for goal tree" 재현 (2026-07-24, 같은 세션)
+
+Pointcloud 필터링 검증 중 `coord_to_goal_node` + YOLO 실시간 검출로
+실제 이동을 시도했을 때, 목표(g_base 약 [0.219, 0.054, 0.311], 접근 위치
+[0.139, 0.054, 0.311], 동적 orientation [0.392, 0.502, 0.608, 0.474])에서
+매번 동일하게 `move_group` 로그 `Unable to sample any valid states for goal
+tree` → `ParallelPlan::solve()` 3초 예산 소진 → `Planner 'OMPL' failed with
+error code FAILURE`로 플래닝 자체가 실패함(`coord_to_goal_node`가 찍는
+`STATUS_ABORTED`는 이 플래닝 실패가 액션 레벨에서 뭉뚱그려진 표시일 뿐,
+실행 중 충돌로 중단된 게 아니었음 — 처음엔 그리퍼 근접 잔여 voxel 문제로
+오판했다가 move_group 로그 확인 후 정정함).
+
+**이번 세션의 pointcloud 필터링과는 무관** — 위 "목표를 바라보는 orientation
+동적 계산" 절의 (0.125,-0.15,0.204) 마진널 실패(같은 증상, orientation
+선택과 무관하게 실패)와 같은 부류의 문제로 보임. 다음 세션 후속 조사
+대상(로드맵 3번, 급하지 않음)에 이 좌표도 추가 사례로 포함. 사용자 판단으로
+이번 세션은 여기서 마무리하고 이 이슈는 파고들지 않기로 함.
+
 ## 상태 (2026-07-24 기준)
 
 ✅ 그리퍼 메시 스케일 버그 수정 — `gripper_base - target_object` 등
@@ -319,4 +547,22 @@ states for goal tree`(플래닝 자체 실패)로 실패함. 원인 확인 결�
 좌표의 마진널 실패는 orientation 계산과 무관해 보이나 근본 원인 후속 조사
 필요.
 ⬜ 그리퍼 근접거리 self-filter 튜닝(`padding_scale: 0.92`/`padding_offset: 0`)은
-실용적 타협 수준 — 정식 해결(근접거리 depth 필터 등) 아직 미착수.
+실용적 타협 수준 — 아래 pointcloud 사전 필터링 실물 검증 이후 재평가 예정.
+✅ **Pointcloud 사전 필터링(로드맵 2단계) 구현 + 실물 검증 완료
+(2026-07-24)** — YOLO bbox로 토마토 영역을 depth 단계에서 사전 제거하는
+`pointcloud_tomato_filter_node` 신규 작성 + `yolo_d435_detector_node` 확장
+(bbox 전체 발행 + `tomato_detections_image` 디버그 시각화) +
+`sensors_3d.yaml`/`demo_octomap.launch.py` 연동. 개발 중 발견+수정한 버그
+2개: (1) 1차 구현이 realsense raw pointcloud(depth 센서 고유 그리드)를 직접
+마스킹해서 컬러 bbox와 그리드가 안 맞던 문제 → `aligned_depth_to_color`
+기반 자체 디프로젝션으로 재작성, (2) 출력 topic QoS가 BEST_EFFORT라
+occupancy_map_monitor(RELIABLE 요구)에 메시지가 전달 안 되던 문제 → 기본
+QoS로 변경(위 "raw pointcloud 그리드 불일치 버그", "QoS 불일치 버그" 절
+참고). 두 수정 후 `bbox_padding_ratio`를 키워가며 실물 D435 + RViz로
+**토마토 위치에 Octomap 구멍이 실제로 생기는 것을 육안 확인함** — 로드맵
+2단계 완료. 그리퍼 근접 self-filter 재평가(로드맵 우선순위 2번)는 다음
+세션 진행 대상.
+⬜ 새 좌표(g_base 약 [0.219,0.054,0.311])에서도 "Unable to sample any valid
+states for goal tree" 플래닝 실패 재현됨 — (0.125,-0.15,0.204)와 같은 부류의
+기존 마진널 IK 미해결 이슈(로드맵 3번, 급하지 않음)에 사례 추가, 이번
+세션엔 조사 안 하기로 함(위 "새로운 위치에서도 ... 재현" 절 참고).

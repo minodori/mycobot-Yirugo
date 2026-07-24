@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'coord_to_goal_node = mycobot_280_pick.coord_to_goal_node:main',
             'yolo_d435_detector_node = mycobot_280_pick.yolo_d435_detector_node:main',
+            'pointcloud_tomato_filter_node = mycobot_280_pick.pointcloud_tomato_filter_node:main',
         ],
     },
 )
