@@ -5,9 +5,44 @@
 수동으로 확인하는 절차. `docs/look_pose.md`, `docs/handeye_calibration.md`와
 이어지는 내용.
 
-## 다음 세션 시작 안내 (2026-07-24 세션 종료 시점)
+## 다음 세션 시작 안내 (2026-07-24 두 번째 세션 종료 시점)
 
-### 이번 세션에 완료된 것
+### 이번 세션(두 번째)에 완료된 것
+- **`Unable to sample any valid states for goal tree` 근본 원인 규명 + 수정**
+  (g_base [0.219,0.054,0.311] 재현 케이스) — 아래 "PointStamped 플래닝 실패
+  근본 원인 규명 + 수정" 절 참고. 핵심: roll(WORLD_UP 기준) 문제가 아니라
+  `target_object` 클리어런스 구(반경 5cm)가 그리퍼 자신의 접근 자세와 항상
+  충돌하던 것 — `compute_ik`/`check_state_validity`로 직접 증명함. roll 후보
+  탐색 + ACM(Allowed Collision Matrix) 기반 그리퍼<->target_object 충돌 허용을
+  구현. 같은 좌표로 4회 재검증 — 플래닝 4/4 성공(기존엔 100% 실패), 실행까지
+  3/4 완료(1회는 아래 "그리퍼 근접거리 self-filter" 항목의 잔여 voxel로 실행 중
+  abort — 별개의 기존 이슈, 오늘 고친 것과 무관).
+- **`_on_target_point`의 기존 race condition 발견 + 수정**: YOLO
+  실시간 검출(`yolo_d435_detector_node`)이 `/target_point`를 프레임마다 계속
+  재발행하는 상황에서, ReentrantCallbackGroup 때문에 `_busy` 체크-후-설정이
+  원자적이지 않아 `self._clear_timer`가 두 번 생성되고 노드가 `NoneType.cancel()`로
+  죽는 크래시를 실물로 재현함. 구독 콜백만 별도 `MutuallyExclusiveCallbackGroup`으로
+  분리해 해결.
+- **(사고 기록) ACM 부분 diff 발행 사고 + 복구**: 원인 조사 중 ACM을 부분적으로만
+  발행했다가 SRDF 기반 self-collision-disable 항목이 전부 날아가는 사고가 있었음
+  (PlanningScene diff로 발행하는 ACM은 병합이 아니라 통째로 대체됨을 실측 확인).
+  `move_group` 재시작으로 정상 복구함 — `coord_to_goal_node.py`의 최종 구현은
+  항상 `/get_planning_scene`으로 현재 전체 ACM을 먼저 조회해 보존한 채로만
+  수정하도록 작성함(재발 방지).
+- **실물 sync_plan 연동 확인 + 수확 순차 처리(harvest_sequence_node) 구현**:
+  사용자가 직접 `sync_plan`을 켠 상태에서 위 수정된 `coord_to_goal_node`로
+  같은 좌표에 실물 이동 성공 확인(시뮬레이션과 실물 일치). 이어서 "YOLO가
+  연속으로 검출/송출하는 상황에서 ripe/disease 토마토를 깊이(z) 가까운
+  순서로 순차 수확 접근"을 위해 `harvest_sequence_node`를 신규 구현 — 아래
+  "수확 순차 처리" 절 참고. 그리퍼 actuation(실제로 쥐고 따는 동작)은 이번
+  세션 범위에서 제외(다음 세션, 사용자 확인).
+- ⚠️ **사고: `coord_to_goal_node`의 look pose 자동 복귀 기능이 YOLO
+  연속 스트림과 맞물려 무한 루프를 일으킴 + 실물 최종 위치 불확실** — 아래
+  "look pose 자동 복귀 + 실물 자동 루프 사고" 절 참고. **다음 세션 시작 전
+  반드시 실물 팔의 실제 현재 위치를 육안으로 확인할 것** — look pose가
+  아닐 수 있음(위 "다음 세션에 할 일" 1번 참고).
+
+### 이전 세션(2026-07-24 첫 번째)에 완료된 것
 - **Pointcloud 사전 필터링(로드맵 2단계) 구현 + 실물 검증 완료** — YOLO bbox로
   토마토 영역을 depth 단계에서 사전 제거해 Octomap이 토마토를 장애물로 안
   잡게 함. 신규 `pointcloud_tomato_filter_node.py`(`mycobot_280_pick`) +
@@ -24,26 +59,61 @@
   confidence 그린 이미지, RViz Image 디스플레이용), `/debug_tomato_point`
   발행 + RViz Point 디스플레이로 특정 좌표 위치 육안 확인하는 절차.
 
-### 다음 세션에 할 일 — 우선순위
-1. **그리퍼 근접거리 self-filter 재평가** (남은 작업 우선순위 2번): pointcloud
+### 다음 세션에 할 일 — 우선순위 (2026-07-24 두 번째 세션 종료 시점 갱신)
+0. ⚠️ **(가장 먼저) 실물 팔의 실제 현재 위치를 육안으로 확인할 것** — 아래
+   "look pose 자동 복귀 + 실물 자동 루프 사고" 절 참고. 세션 종료 시점
+   시뮬레이션(FakeSystem)의 `/joint_states`는 look pose 값으로 보였지만,
+   그 이후 벌어진 무한 루프의 마지막 사이클이 깔끔하게 끝났는지 확인 안 된
+   채 세션이 끝남 — **실물이 look pose가 아닌 "이상한 위치"에 멈춰있을 수
+   있음**(사용자 보고). 토크 걸린 채면 무리한 위치라도 버티고 있겠지만,
+   다음 세션 시작 전 반드시:
+   1. 실물 팔을 육안으로 확인(주변 충돌 위험 있는 자세인지).
+   2. `docs/look_pose.md` 1번 순서대로 다시 look pose로 `send_angles` 보내
+      맞출 것(시뮬레이션 값을 믿지 말고 실물 기준으로).
+   3. `initial_positions.yaml`도 그 값과 일치하는지 재확인 후 시작.
+1. **그리퍼 근접거리 self-filter 재평가** (로드맵 2번, 아직 미착수): pointcloud
    사전 필터링이 실물 검증됐으니, `sensors_3d.yaml`의 `padding_scale: 0.92`
-   타협이 지금도 필요한지, 잔여 voxel 문제가 줄었는지 재확인.
-2. **IK 마진널 실패 조사** (로드맵 3번, 급하지 않음): 이번 세션에 g_base
-   [0.219,0.054,0.311] 근처 좌표에서 `Unable to sample any valid states for
-   goal tree`(플래닝 자체 실패, orientation 무관)가 재현됨 — 지난 세션
-   (0.125,-0.15,0.204)와 같은 부류. 근본 원인(실물-시뮬 미세 드리프트 vs
-   순수 위치의 IK 특이점) 미확인. 아래 "새로운 위치에서도 ... 재현" 절 참고.
+   타협이 지금도 필요한지, 잔여 voxel 문제가 줄었는지 재확인. 이번 세션
+   재검증(아래 "PointStamped 플래닝 실패 근본 원인 규명" 절)에서 4회 중 1회
+   여전히 이 잔여 voxel로 실행 중 abort가 재현됨 — 여전히 살아있는 이슈.
+2. **(0.125,-0.15,0.204) 좌표를 새 코드(roll 탐색 + ACM 수정)로 재검증**: 이번
+   세션에 g_base [0.219,0.054,0.311]의 `Unable to sample any valid states for
+   goal tree`는 근본 원인을 찾아 수정했지만(아래 절 참고), 지난 세션에 같은
+   증상을 보였던 다른 좌표(0.125,-0.15,0.204)는 아직 새 코드로 재테스트 안 함
+   — 원인이 정말 같았는지(target_object 충돌) 확인 필요.
 3. `bbox_padding_ratio` 최종값 확정 — 세션 종료 시점 `DEFAULT_BBOX_PADDING_RATIO
    = 0.5`(실물 조정 중, 0.2 기본값은 파일에 주석으로 남겨둠). 더 튜닝하거나
    확정할 것.
-4. 이후 원래 로드맵(카메라 감지 → 좌표 계산 → 장애물 회피 플래닝 → 실물
+4. **`harvest_sequence_node` 실물 end-to-end 검증** (이번 세션 신규 구현,
+   미검증): 실제 D435로 여러 ripe/disease 토마토가 보이는 상황에서
+   `/start_harvest_sequence` 호출 -> 큐가 깊이 가까운 순서로 정렬되는지 ->
+   `sync_plan` 켠 상태에서 순차로 실물이 이동하는지 확인. 위 "수확 순차
+   처리" 절 참고.
+5. 이후 원래 로드맵(카메라 감지 → 좌표 계산 → 장애물 회피 플래닝 → 실물
    이동 전체 파이프라인 완성) 계속 진행, 완성되면 automato_ws로 포팅
    (사용자 확인된 방침, 다시 묻지 말 것).
 
 ### 참고
 - 커밋은 요청 시에만.
-- RPi `sync_plan`은 실물 이동 테스트 아닐 땐 꺼둔 채로 두는 게 안전(이번
-  세션 종료 시점 꺼짐 상태).
+- RPi `sync_plan`은 실물 이동 테스트 아닐 땐 꺼둔 채로 두는 게 안전. 세션
+  종료 시점 RPi에서 `pgrep -af sync_plan`으로 확인했을 때 프로세스가 없었음
+  (꺼진 상태로 추정) — 단, 아래 사고 절 참고: 정상 종료했는지 크래시로
+  죽었는지는 확인 안 됨.
+- **[Tier4, so101-ros-physical-ai 교훈 이식] 실물 테스트 시작 전, 세션 종료
+  시점뿐 아니라 매번 먼저 확인할 것**: so101(자매 프로젝트)에서 이미 내려간
+  줄 알았던 스택이 실제로는 살아서 같은 실물 포트를 물고 있어 두 스택이
+  충돌한 사고가 있었음(`fuser`로 포트 점유 프로세스를 추적해서야 발견함).
+  mycobot은 실물 명령이 이 워크스페이스의 ros2_control이 아니라 RPi
+  (jetcobot_126b)의 `sync_plan`을 거쳐 나가므로, 로컬 `ps aux`(아래 3번
+  섹션)만으로는 이 리스크를 못 잡음 — RPi 쪽도 같이 확인해야 함:
+  ```bash
+  ssh jetcobot_126b 'pgrep -af "sync_plan|MyCobot280"; fuser /dev/ttyUSB0 2>&1'
+  ```
+  `fuser`가 뭔가를 출력하면(포트 점유 중) 어떤 프로세스인지 확인 후 의도한
+  것이 아니면 정리하고 시작할 것 — 특히 `sync_plan`을 새로 띄우기 전에
+  이전 세션의 `sync_plan`이 안 죽고 남아있으면 두 프로세스가 같은 실물에
+  동시에 명령을 보내는 구조적 위험이 있음(so101에서 mock/real 스택이 같은
+  네임스페이스를 공유해 실제로 겪은 사고와 같은 클래스의 문제).
 
 ## 사전 조건
 
@@ -533,6 +603,206 @@ error code FAILURE`로 플래닝 자체가 실패함(`coord_to_goal_node`가 찍
 대상(로드맵 3번, 급하지 않음)에 이 좌표도 추가 사례로 포함. 사용자 판단으로
 이번 세션은 여기서 마무리하고 이 이슈는 파고들지 않기로 함.
 
+## PointStamped 플래닝 실패 근본 원인 규명 + 수정 (2026-07-24, 두 번째 세션)
+
+**배경**: 위 "새로운 위치에서도 ... 재현" 절에서 미뤄뒀던 g_base
+[0.219,0.054,0.311] 좌표(접근 위치 [0.139,0.054,0.311], 동적 orientation
+[0.392,0.502,0.608,0.474])의 `Unable to sample any valid states for goal
+tree`를 이번 세션에 실제로 재현하며 파고듦.
+
+**1차 가설(틀림): WORLD_UP 기준 roll이 IK 데드존에 걸린다** — `/compute_ik`
+서비스로 같은 forward 방향에 대해 roll을 24단계(15도 간격)로 스윕한 결과,
+`avoid_collisions=False`로는 11/24 각도에서 IK가 풀렸는데 `coord_to_goal_node`가
+실제로 쓰던 roll(=WORLD_UP 기준 단일값)은 그 안 풀리는 13개 중 하나였음. 이
+결과만 보고 "roll 선택이 문제"라고 처음엔 결론 내림.
+
+**2차 검증(진짜 원인 발견): `/check_state_validity`로 충돌 주체를 직접 확인**
+— roll을 바꿔가며 `avoid_collisions=True`로 재검증했더니 **12개 후보 전부
+실패**함. `avoid_collisions=False`로 찾은 IK 해에 `check_state_validity`를
+돌려보니 **모든 roll에서 예외 없이 `gripper_base`/`gripper_left1~3`/
+`gripper_right1~3`이 `target_object`(우리가 목표 지점에 등록해둔 반경 5cm
+클리어런스 구)와 충돌**하고 있었음(깊이 최대 ~2.9cm). 즉 roll 선택의 문제가
+아니라, **`APPROACH_OFFSET_X`(8cm) − `TARGET_OBJECT_RADIUS`(5cm) = 3cm인데
+그리퍼 손가락이 flange에서 실제로 ~5.5cm 뻗어나가 있어서(look-at이 정확히
+목표를 겨냥할수록) 손가락이 항상 그 클리어런스 구를 뚫고 들어가는 구조적
+문제**였음. `APPROACH_OFFSET_X`를 늘리거나(0.10~0.18) forward축 기준으로
+당겨도 이 근처 좌표는 오히려 통째로 IK 불가 지점이 돼버려(팔 베이스에
+너무 가까워짐) 해결이 안 됐고, `TARGET_OBJECT_RADIUS`를 실제 토마토
+반지름(2cm)보다도 작은 1.5cm까지 줄여야 겨우 일부 roll이 풀렸음(Octomap
+노이즈 클리어런스 여유를 포기해야 해서 채택 안 함).
+
+**최종 수정**: 그리퍼가 자기가 접근하려는 목표 지점 자체(`target_object`)와
+겹치는 건 오히려 당연한 것(집으려면 가까이 가야 함)이라는 판단 하에, **Allowed
+Collision Matrix(ACM)로 그리퍼 7개 링크와 `target_object` 사이의 충돌만
+명시적으로 허용**함(Octomap이나 다른 world 장애물과의 충돌 검사는 그대로
+유지). `coord_to_goal_node.py`에 `_allow_gripper_target_object_collision()`을
+추가해 노드 시작 시 1회 실행:
+1. `/get_planning_scene`(`ALLOWED_COLLISION_MATRIX` 컴포넌트)으로 현재 전체
+   ACM을 조회.
+2. `target_object` 행/열을 추가하고 `GRIPPER_LINK_NAMES`(7개, URDF
+   `mycobot_280_m5_adaptive_gripper.urdf`의 그리퍼 링크와 동일) 칸만 `True`로
+   설정.
+3. `PlanningScene(is_diff=True)`로 재발행.
+
+⚠️ **사고 + 교훈**: 처음에 이 조사를 하며 실험적으로 `target_object`와
+그리퍼 7개 링크만 담은 **부분** ACM을 발행했다가, 기존 SRDF 기반
+self-collision-disable 항목(arm 8개 링크)이 전부 사라지는 사고가 남 —
+**PlanningScene diff로 발행하는 ACM은 기존 매트릭스와 병합되는 게 아니라
+발행한 내용으로 통째로 대체됨**을 직접 확인함(`/get_planning_scene`으로
+전/후 비교). `move_group` 재시작으로 SRDF 원본 ACM을 다시 로드해 복구함.
+그래서 최종 구현은 반드시 전체 ACM을 먼저 조회해 기존 항목을 보존한 채로만
+수정하도록 작성함(위 절차의 1번). **향후 ACM을 다시 건드릴 일이 있으면 이
+방식(조회 → 보존 → 추가 → 재발행)을 반드시 따를 것 — 부분 diff 절대 금지.**
+
+**roll 후보 탐색도 별도로 구현해 유지함**: 근본 원인은 ACM이었지만, 1차
+가설(roll 데드존)도 100% 틀린 건 아님 — 같은 forward에서도 특정 roll만
+IK 자체가 안 풀리는 경우가 실제로 있어서(6축 팔 특성), `_compute_look_at_quat_xyzw()`에
+`roll_rad` 파라미터를 추가하고 `ROLL_CANDIDATES_RAD`(30도 간격 12개)를
+`/compute_ik`로 순차 사전체크해 실제로 풀리는 첫 후보를 채택하도록 함.
+KDL IK가 같은 조건에서도 매 호출 성공률이 편차 있는 확률적 솔버임을 실측
+확인해(같은 조건 10회 중 7~9회 성공) 후보당 `ROLL_CANDIDATE_IK_RETRIES=3`번
+재시도하도록 함.
+
+**부수 발견: `_on_target_point`의 기존 race condition** — 재검증 중
+`yolo_d435_detector_node`가 프레임마다 `/target_point`를 계속 재발행하는
+상황에서 노드가 `AttributeError: 'NoneType' object has no attribute 'cancel'`로
+죽는 크래시가 실물로 재현됨. `ReentrantCallbackGroup` 때문에 `_on_target_point`
+콜백 자신이 동시에 여러 스레드에서 실행될 수 있어 `_busy` 체크-후-설정이
+원자적이지 않았던 게 원인(이 버그는 오늘 만든 게 아니라 원래 있던 것 —
+그동안 `ros2 topic pub --once`로만 테스트해서 안 드러났다가, YOLO 실시간
+스트림과 맞물리며 처음 발현됨). 구독 콜백만 별도
+`MutuallyExclusiveCallbackGroup`으로 분리해 자기 자신과는 절대 동시 실행되지
+않도록 수정(다른 콜백들은 기존 `ReentrantCallbackGroup` 유지).
+
+**검증**: 같은 좌표(g_base [0.219,0.054,0.311])로 수정 후 4회 연속 테스트
+— **플래닝 4/4 성공**(수정 전엔 100% `Unable to sample any valid states for
+goal tree`로 실패). 실행까지는 3/4 완료, 1회는 그리퍼 근접 잔여 octomap
+voxel(`<octomap>` <-> `gripper_right1`)로 실행 중간에 abort — 이건 위
+"그리퍼 근접거리 self-filter" 항목(`padding_scale: 0.92` 타협)에 해당하는
+별개의 기존 이슈로, 오늘 고친 문제와 무관함(다음 세션 우선순위 1번으로
+재평가 예정).
+
+## 수확 순차 처리 (harvest_sequence_node, 2026-07-24 두 번째 세션)
+
+**배경**: 위 근본 원인 수정 이후 사용자가 직접 `sync_plan`을 켜고 같은 좌표로
+실물 이동까지 성공 확인함. 다음 질문은 "YOLO가 검출한 토마토를 실제로 바로
+수확하려면?" — 두 가지로 나눠 범위를 정함:
+1. 그리퍼 actuation(실제로 쥐고 따는 동작)은 **이번 세션 범위 밖**(다른
+   세션에서 진행, 사용자 확인). 지금은 "접근"까지만 자동화됨.
+2. YOLO는 카메라가 살아있는 한 프레임마다 계속 검출을 재발행함(연속
+   스트림) — 이 상황에서 어떻게 여러 토마토를 순서대로 처리할지가 이번
+   세션에 다룬 부분. 사용자 요구사항: **look pose에서 촬영한 스냅샷 기준으로,
+   z(카메라로부터의 깊이)가 가장 낮은(가까운) 것부터 ripe/disease를 순차
+   처리**.
+
+**왜 "매 프레임 반응"이 아니라 "스냅샷 한 번"이어야 하는가**: 카메라가
+eye-in-hand라, 팔이 목표로 접근하기 시작하면 카메라 시점이 바뀌어 (1) 같은
+물체의 좌표가 흔들리거나 (2) 팔 자신이 시야를 가려 완전히 다른 검출로
+바뀔 수 있음. 그래서 순차 처리 목록은 **look pose에 있을 때 한 번만
+캡처**하고, 그 목록을 g_base 좌표로 즉시 변환해 고정한 뒤, 그 이후로는
+새로 들어오는 검출 스트림과 무관하게 큐만 갖고 끝까지 진행함.
+
+**구현** (`mycobot_280_pick` 패키지):
+1. `yolo_d435_detector_node.py`: 기존 `target_point`(ripe 중 confidence
+   1등 하나만) 로직은 그대로 두고, 새 토픽 `tomato_candidates`
+   (`std_msgs/msg/Float32MultiArray`)를 추가 — 이번 추론 결과에서
+   `HARVEST_CLASS_NAMES = ('ripe', 'disease')` 클래스에 해당하는 검출
+   **전부**를 `[class_id, x, y, z, confidence, ...]`로 평탄화해 발행(카메라
+   프레임 기준 3D 좌표, 기존 픽셀->3D 변환식 재사용, 추가 추론 없음).
+2. `coord_to_goal_node.py`: `plan_result`(`std_msgs/msg/Bool`) 토픽 추가 —
+   `_check_motion_complete`가 플래닝/실행 성공 여부를 판단할 때마다 같이
+   발행함. 상위 시퀀서가 "이 목표가 끝났으니 다음 목표를 보내도 되는지"
+   판단하는 신호로 씀.
+3. **신규** `harvest_sequence_node.py`: `/start_harvest_sequence`
+   (`std_srvs/srv/Trigger`) 서비스 호출 시점에:
+   - 그 순간의 최신 `tomato_candidates`를 스냅샷.
+   - TF(`g_base` <- 카메라 프레임)로 즉시 전부 변환(호출 시점 1회 조회 —
+     이후 팔이 움직여도 이 변환을 다시 안 함).
+   - **원본 카메라 프레임 z(깊이) 오름차순 정렬**(g_base로 변환한 뒤의 z는
+     높이라 의미가 다르므로, 정렬은 변환 전 z 기준).
+   - 큐에 저장 후 첫 목표를 `/target_point`(`g_base` 기준)로 발행.
+   - `plan_result`가 들어올 때마다(성공/실패 무관) `NEXT_TARGET_DELAY_SEC`
+     (1.5초, `coord_to_goal_node`의 옥토맵 클리어 지연보다 여유 있게) 대기
+     후 큐의 다음 목표를 발행. 큐가 비면 "수확 시퀀스 완료" 로그.
+   - 진행 중 재호출은 거부(`이미 수확 시퀀스 진행 중`), 후보가 비어있거나
+     TF 실패 시에도 명확한 실패 메시지로 즉시 응답.
+
+**검증**: 합성 데이터(가짜 `tomato_candidates` 3개, 서로 다른 깊이)로
+서비스 시작 시 후보가 없을 때 정상적으로 실패 응답하는 것 확인. 노드 기동/
+서비스 등록(`/start_harvest_sequence`) 확인. **실제 YOLO 검출 + 실물 로봇
+이동으로 큐 정렬/순차 접근까지 끝까지 도는 end-to-end 테스트는 아직 안 함**
+— `coord_to_goal_node`가 `sync_plan`과 함께 떠 있는 상태에서 가짜 좌표로
+트리거하면 실물이 임의 위치로 움직이는 위험이 있어 이번 세션엔 보류함
+(다음 세션 실물 재검증 대상).
+
+**미검증 (다음 세션 실물 재확인 필요)**:
+- 실제 D435로 여러 토마토(ripe/disease 섞어서)가 동시에 보이는 상황에서
+  `/start_harvest_sequence` 호출 -> 큐 정렬 순서(가까운 것부터) -> 순차
+  실물 이동까지 전체 흐름 확인.
+- 접근 도중 카메라 시야에서 다음 대상이 아예 안 보이게 되는 경우(팔이
+  가려서) 실제로 문제가 안 되는지(스냅샷 고정 방식이라 이론상 문제
+  없어야 하나 실물로 미확인).
+
+## ⚠️ 사고: look pose 자동 복귀 + 실물 자동 루프 (2026-07-24, 두 번째 세션 종료 직전)
+
+**배경**: 사용자가 "목표점 도달 후 1~2초 대기하고 look pose로 돌아와야
+한다"고 요청 — 다음 토마토를 보려면 카메라가 넓은 시야(look pose)로
+돌아와야 하기 때문. `coord_to_goal_node`에 `RETURN_TO_LOOK_POSE_DELAY_SEC`
+(1.5초 대기) + `move_to_configuration(LOOK_POSE_JOINT_POSITIONS)`로 목표
+도달 후 자동 복귀하는 로직을 추가함(`_check_motion_complete` ->
+`_start_return_to_look_pose` -> `_check_return_complete` -> `plan_result`
+발행 순서로 재구성).
+
+**문제**: 이 기능을 테스트하려고 `yolo_d435_detector_node`(연속 검출/발행)와
+`coord_to_goal_node`를 둘 다 띄운 상태로 뒀는데, **둘을 동시에 켜두면
+사용자가 명시적으로 트리거하지 않아도 무한 루프가 자동으로 돎**:
+1. `yolo_d435_detector_node`가 `ripe` 검출 시 `/target_point`를 자동 발행
+   (기존부터 있던 동작, 1Hz).
+2. `coord_to_goal_node`가 그 좌표로 자동 접근.
+3. 새로 추가한 로직이 도착 후 자동으로 look pose 복귀.
+4. look pose에서 카메라가 다시 같은(또는 다른) `ripe` 토마토를 보고 →
+   `yolo_d435_detector_node`가 또 `/target_point`를 발행 → 2번부터 반복.
+
+로그로 실제 여러 사이클이 자동으로 돈 것을 확인함(목표 좌표가 매번
+달라짐: (0.167,0.053,0.187) → (0.117,0.013,0.402) → (-0.025,0.060,0.249) →
+...). `harvest_sequence_node`가 의도한 "명시적 트리거 + 스냅샷 큐" 방식과
+전혀 다른, **의도하지 않은 자동 반복 이동**이 실물에서 발생한 것 — 이건
+`yolo_d435_detector_node`가 계속 켜져 있는 한 `coord_to_goal_node` 혼자서도
+(harvest_sequence_node 없이도) 벌어지는 문제임.
+
+**조치**: 발견 즉시 `yolo_d435_detector_node`를 강제 종료해 `/target_point`
+발행원을 끊어 루프를 멈춤. 그 직후 확인한 `/joint_states`는 look pose
+값이었으나, **이후 세션 정리(모든 로컬 프로세스 kill) 시점에 사용자가
+"목표 도착 → look pose 복귀 → 다시 이상한 위치로 가서 멈췄다"고 정정함**
+— 즉 내가 확인한 시점 이후에도 최소 한 사이클이 더 돌았고, 그 마지막
+사이클이 깔끔하게 완료되지 않은 채(또는 완료됐지만 다음 목표로 또 넘어간
+채) 프로세스가 죽어서 **실물의 최종 정지 위치가 불확실함**. 세션 종료
+시점 로봇/카메라 모두 연결 해제된 상태라 원격으로 재확인 불가.
+
+**교훈 + 재발 방지**:
+1. **`yolo_d435_detector_node`(연속 자동 발행)와 `coord_to_goal_node`를
+   동시에 띄우는 것 자체가 "자동 추적 모드"임을 명확히 인지할 것** —
+   테스트/디버깅 목적으로 잠깐 띄우더라도 무한 루프가 될 수 있음을 미리
+   예상하고, 짧게 확인 후 바로 끄거나 애초에 `target_point` 구독을 끊어둘
+   것.
+2. **자동 복귀 같은 "연쇄 동작" 기능을 추가할 땐, 그 기능이 기존의 다른
+   자동 트리거(YOLO 연속 발행)와 결합했을 때 루프를 만들 수 있는지 미리
+   따져볼 것** — 각 기능은 개별적으로 안전해 보여도 조합하면 무한 루프가
+   될 수 있음.
+3. **실물이 얽힌 세션을 정리할 때, "안전한 상태로 끝났다"고 보고하기 전에
+   반드시 정지 직후 최신 상태를 재확인할 것** — 중간에 확인한 스냅샷을
+   최종 상태로 오인하면 안 됨(이번에 내가 한 실수).
+4. `harvest_sequence_node`를 실제로 쓸 때도 같은 위험이 있음 — 시퀀스가
+   끝난 뒤(`_publish_next_target`에서 큐가 비어 "완료" 로그가 찍힌 뒤)에도
+   `yolo_d435_detector_node`가 계속 켜져 있으면, `coord_to_goal_node`가
+   그 뒤로도 계속 새 `/target_point`에 반응해서 똑같이 자동 루프가 될 수
+   있음(harvest_sequence_node의 큐 로직과 무관하게, `coord_to_goal_node`는
+   `/target_point`를 받으면 무조건 반응하는 구조라서). **다음 세션에 고려할
+   구조 개선**: 수확 시퀀스 진행 중이 아닐 때는 `yolo_d435_detector_node`의
+   `/target_point` 발행을 끄거나(파라미터화), `coord_to_goal_node`가
+   `harvest_sequence_node`가 관리하는 세션 중에만 `/target_point`를
+   받도록 하는 등의 게이팅 필요.
+
 ## 상태 (2026-07-24 기준)
 
 ✅ 그리퍼 메시 스케일 버그 수정 — `gripper_base - target_object` 등
@@ -562,7 +832,65 @@ QoS로 변경(위 "raw pointcloud 그리드 불일치 버그", "QoS 불일치 �
 **토마토 위치에 Octomap 구멍이 실제로 생기는 것을 육안 확인함** — 로드맵
 2단계 완료. 그리퍼 근접 self-filter 재평가(로드맵 우선순위 2번)는 다음
 세션 진행 대상.
-⬜ 새 좌표(g_base 약 [0.219,0.054,0.311])에서도 "Unable to sample any valid
-states for goal tree" 플래닝 실패 재현됨 — (0.125,-0.15,0.204)와 같은 부류의
-기존 마진널 IK 미해결 이슈(로드맵 3번, 급하지 않음)에 사례 추가, 이번
-세션엔 조사 안 하기로 함(위 "새로운 위치에서도 ... 재현" 절 참고).
+✅ **g_base [0.219,0.054,0.311] "Unable to sample any valid states for goal
+tree" 근본 원인 규명 + 수정 완료 (2026-07-24, 두 번째 세션)** — 진짜 원인은
+roll 선택이 아니라 목표 지점에 등록하는 `target_object` 클리어런스 구(5cm)가
+그리퍼 자신의 접근 자세와 항상 충돌하던 것(`compute_ik`+`check_state_validity`로
+직접 증명, 위 "PointStamped 플래닝 실패 근본 원인 규명 + 수정" 절 참고).
+ACM으로 그리퍼<->target_object 충돌 허용 + roll 후보 탐색(보조)으로 수정,
+같은 좌표 4회 재검증 플래닝 4/4 성공. 부수적으로 YOLO 고빈도 발행 시
+`_on_target_point`가 죽던 기존 race condition도 발견+수정.
+⬜ (0.125,-0.15,0.204)는 지난 세션에 같은 증상을 보였던 별도 좌표 — 아직 새
+코드로 재검증 안 함, 다음 세션 우선순위 2번.
+🔶 **수확 순차 처리(harvest_sequence_node) 구현 완료, 실물 end-to-end 미검증
+(2026-07-24, 두 번째 세션)** — 위 "수확 순차 처리" 절 참고. 로직/서비스
+등록만 스모크테스트, 실제 다중 토마토 순차 접근은 다음 세션 대상.
+⚠️ **목표 도달 후 look pose 자동 복귀 기능 추가 + 실물 자동 루프 사고
+(2026-07-24, 두 번째 세션 종료 직전)** — 위 "사고: look pose 자동 복귀 +
+실물 자동 루프" 절 참고. `yolo_d435_detector_node` + `coord_to_goal_node`를
+동시에 켜두면 자동 반복 이동이 발생함(harvest_sequence_node 없이도 재현).
+**세션 종료 시점 실물의 정확한 최종 위치 불확실 — 다음 세션 시작 전
+최우선으로 실물 육안 확인 + look pose 재동기화 필요**(위 "다음 세션에 할
+일" 0번 참고).
+
+## [Tier5] 자매 프로젝트(so101-ros-physical-ai) 교훈 — 향후 주의사항 (코드 변경 없음, 기록만)
+
+so101-ros-physical-ai(SO-101 5축 팔 + D435 + YOLO, 같은 문제 도메인)가
+2026-07-26~27 실물 테스트에서 겪은 사고 중, mycobot이 아직 그 단계에
+도달하지 않아 지금 당장은 코드로 옮길 필요 없지만 **나중에 같은 실수를
+반복하지 않도록 미리 기록해두는 두 가지**.
+
+### 1. 그리퍼 actuation 구현 시 "그리퍼 열기"를 반드시 명시적 첫 단계로 넣을 것
+
+현재 `coord_to_goal_node`는 실제 그리퍼 개폐(actuation)를 구현하지 않고
+목표보다 `APPROACH_OFFSET_X`만큼 당긴 위치로 flange가 접근하는 것으로만
+대체하고 있음(모듈 docstring 참고) — URDF에는 이미
+`mycobot_280_m5_adaptive_gripper`가 있고 `gripper_controller` 조인트가
+ros2_control에도 등록돼 있어서, 실제 파지 로직을 붙이는 것 자체는 남은
+로드맵 항목일 뿐 하드웨어가 없는 게 아님.
+
+so101에서는 파지 실패를 여러 세션에 걸쳐 반복 조사했는데, 최종 원인이
+"정렬→접근→파지→후퇴" 4단계 어디에도 그리퍼를 **여는** 단계 자체가 없어서
+접근/파지 내내 그리퍼가 거의 닫힌 값(-0.16rad)이었던 것으로 밝혀짐 — 위치
+정확도 문제와는 무관하게 이 버그 하나만으로 모든 파지가 실패할 수밖에
+없었음. mycobot도 실제 파지 로직을 구현할 때 같은 함정에 빠지기 쉬움(그리퍼
+제어 코드를 추가했다고 "당연히 열려있겠지"라고 가정하기 쉬움) — 구현 시
+**정렬 → 그리퍼 열기(명시적 단계) → 접근 → 파지(닫기) → 후퇴** 순서를
+처음부터 의식적으로 넣을 것, 그리퍼 열기 단계를 빠뜨리지 않았는지 실물
+검증 시 `/joint_states`의 그리퍼 조인트 값을 직접 확인할 것.
+
+### 2. 파지 후 후퇴 궤적이 관절공간 플랜이라 직선을 보장 안 함 — so101도 미해결인 공유 리스크
+
+so101은 파지 후 "복귀"가 (반지름만 다른) 두 관절 상태 사이의 OMPL
+관절공간 플랜이었는데, 실제 경로는 직선/일정 높이를 전혀 보장하지 않아서
+"잡고 바로 위로 솟았다 내려오는" 예상 밖 모션이 됐음(사용자가 실물로
+관찰). mycobot의 `_start_return_to_look_pose`도 동일하게
+`move_to_configuration(LOOK_POSE_JOINT_POSITIONS, ...)`(관절공간 플랜)이라
+구조적으로 같은 리스크가 있음 — 지금은 그리퍼 actuation이 없어서 아직
+체감되지 않았을 뿐, 실제 파지가 붙으면 같은 증상이 나올 수 있음.
+`RETURN_TO_LOOK_POSE_DELAY_SEC`(1.5초 대기)는 이미 있어서 so101이 나중에
+추가한 "파지 후 1초 대기"에 해당하는 부분은 커버돼 있음 — 부족한 건 경로
+자체의 직선성. so101도 아직 완성된 해법이 없음(Cartesian 경로 제약, 중간
+waypoint 강제 등을 다음 과제로 남긴 상태) — **so101 쪽에서 검증된 해법이
+나오면 그때 참고할 것, 지금 mycobot에서 먼저 재설계할 필요는 없음**(그리퍼
+actuation이 아직 없어 실익이 낮음).

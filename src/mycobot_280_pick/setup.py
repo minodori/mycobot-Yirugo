@@ -30,6 +30,8 @@ setup(
             'coord_to_goal_node = mycobot_280_pick.coord_to_goal_node:main',
             'yolo_d435_detector_node = mycobot_280_pick.yolo_d435_detector_node:main',
             'pointcloud_tomato_filter_node = mycobot_280_pick.pointcloud_tomato_filter_node:main',
+            'harvest_sequence_node = mycobot_280_pick.harvest_sequence_node:main',
+            'rviz_control_panel_node = mycobot_280_pick.rviz_control_panel_node:main',
         ],
     },
 )
