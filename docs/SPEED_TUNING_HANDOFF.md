@@ -30,7 +30,7 @@ write-only 전환한 것이 이 프로젝트에서 가장 큰 개선이었다(�
 
 | 파일 | 변수 | 값 |
 |---|---|---|
-| coord_to_goal_node | `VELOCITY_SCALING` / `ACCELERATION_SCALING` | 0.35 / 0.25 |
+| coord_to_goal_node | `VELOCITY_SCALING` / `ACCELERATION_SCALING` | **0.5** / 0.25 (리팩터 후 재조정, 6절 참고) |
 | coord_to_goal_node | `APPROACH_*` / `RETREAT_*` | 0.2 / 0.2 |
 | coord_to_goal_node | `tolerance_orientation` (정렬) | 0.2 |
 | sync_plan | `SPEED_GAIN_K` / `SPEED_HYSTERESIS` | 1.7 / 4 |
@@ -174,7 +174,9 @@ jerk가 튄다 — 가벼운 팔에서 기계적 울림이 된다.
 검증: `ros2 param get /move_group robot_description_planning.joint_limits.<관절>.max_jerk`,
 그리고 `move_group` 터미널에 `Joint jerk limits are not defined` 경고가 **없어야** 한다.
 
-### (3) `VELOCITY_SCALING` — U자 곡선, 0.35가 최적
+### (3) `VELOCITY_SCALING` — U자 곡선, 최적점이 이동했다 (0.35 → 0.5)
+
+**접근축 리팩터 이전** (정렬 위치 반지름 0.102m, J1 스윙 60~120°):
 
 | 값 | 결과 |
 |---|---|
@@ -185,6 +187,19 @@ jerk가 튄다 — 가벼운 팔에서 기계적 울림이 된다.
 0.5가 나쁘다는 판단의 근거: 그때 접근·후퇴(0.2 유지) 구간의 relay 명령이 **완전히
 동일**했는데도(ω 17.9, dmax 1.077, dt 표준편차 0.0046s) 흔들렸다. 명령이 그대로인데
 흔들리면 원인은 명령 스트림 밖 = 기계 진동이다.
+
+**접근축 리팩터 이후** (정렬 위치 반지름 0.131~0.146m, J1 스윙 약 34°) — **0.5가 최선**
+(2026-07-30 실물 검증, 사용자 평가 "0.35는 너무 느려서. 이렇게 하니 좀 더 부드럽게
+빨리 움직여").
+
+같은 실물 조건에서 결론이 뒤집힌 것이므로, **U자 곡선 자체가 오른쪽으로 이동했다**고
+읽어야 한다. 위 3차 진단이 지목한 원인이 바로 "정렬·복귀의 빠른 **대각도 스윙**이 팔
+구조를 울린다"였는데, 리팩터가 그 스윙을 60~120°에서 34°로 줄여 **진동의 입력 자체를
+작게 만들었다**(원인: 손목 측면 오프셋 7.3cm 때문에 정렬 위치 반지름이 작을수록 J1이
+크게 돌아야 함 — `docs/VISUALIZATION_HANDOFF.md` 1절 참고).
+
+즉 **"0.5는 과했음"은 그 시절 기하에 한정된 결론**이다. 기하가 바뀌면 이 값을 다시
+시험해볼 가치가 있다. 상한 0.65(서보 speed 상한)는 기하와 무관하므로 그대로다.
 
 `ACCELERATION_SCALING`이 0.1로 다른 구간(0.2)의 절반이었던 것도 함께 올렸다 —
 정렬·복귀만 램프가 두 배로 길었고, 떨림이 그 두 구간에 몰린 것과 방향이 맞았다.
@@ -216,7 +231,7 @@ jerk가 튄다 — 가벼운 팔에서 기계적 울림이 된다.
 
 | 변수 | 값 | 의미 | 적용 구간 |
 |---|---|---|---|
-| `VELOCITY_SCALING` | 0.35 | joint_limits 최대속도(1.57rad/s)에 곱하는 비율 | 1/5 정렬, look pose 복귀 |
+| `VELOCITY_SCALING` | **0.5** | joint_limits 최대속도(1.57rad/s)에 곱하는 비율 | 1/5 정렬, look pose 복귀 |
 | `ACCELERATION_SCALING` | 0.25 | 가감속 완만함 | 동일 |
 | `APPROACH_VELOCITY/ACCELERATION_SCALING` | 0.2 | 3/5 직진 접근 | 3/5 |
 | `RETREAT_VELOCITY/ACCELERATION_SCALING` | 0.2 | 열매 쥔 구간 | 5/5 + 복귀까지 |
@@ -321,7 +336,7 @@ PYTHONUNBUFFERED=1 stdbuf -oL ros2 run mycobot_280_moveit2_control sync_plan 2>&
 | `set_color`도 같은 블로킹 경로 | **소스 확인.** 단계 전환마다 1.5초 정지였음 |
 | `max_jerk` 5.0이 미세 떨림을 줄임 | **실물 확인** (로그 지표로는 재현 못 함 — 6-(2)) |
 | `max_jerk` 20.0은 효과 없음(제한선이 느슨) | **실물+로그 확인** |
-| `VELOCITY_SCALING` U자 곡선, 0.35 최적 | **실물 확인** (0.2 / 0.35 / 0.5 비교) |
+| `VELOCITY_SCALING` U자 곡선 | **실물 확인** — 리팩터 전 0.35 최적(0.2/0.35/0.5 비교), 리팩터 후 **0.5** 최적. 최적점이 이동함 |
 | 0.5의 악화 원인이 기계 진동 | **강한 정황.** 명령 불변인데 흔들림. 진동 자체는 미계측 |
 | `tolerance_orientation` 0.2가 접근 구간 재배치를 줄임 | **로그 확인** (J4 67.7→5.1°) |
 | 배제된 5개 가설 | **전부 실물 확인** (4절) |

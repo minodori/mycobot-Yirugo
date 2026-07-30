@@ -18,7 +18,7 @@ END_EFFECTOR_NAME/GROUP_NAME 값은 tomato_scene_test.py에서 이미 확인된 
 -> 파지(닫기) -> 후퇴 5단계로 실행함(so101-ros-physical-ai 자매 프로젝트가
 "그리퍼 열기 단계 누락"으로 전체 파지가 실패했던 교훈을 처음부터 반영,
 docs/obstacle_avoidance_manual_test.md "[Tier5]" 절 참고). 정렬/후퇴는
-목표보다 APPROACH_OFFSET_X만큼 로봇 쪽(x축 음의 방향)으로 당긴 위치, 직진
+목표보다 APPROACH_STANDOFF_M만큼 접근축(forward) 반대 방향으로 당긴 위치, 직진
 접근은 목표 지점 그 자체(같은 orientation)로 이동함. 어느 한 단계라도
 실패하면 그 자리에서 중단하고 look pose 복귀를 시도함(나머지 단계는
 건너뜀). 그리퍼 열림/닫힘 방향(GRIPPER_OPEN_POSITION/
@@ -180,12 +180,9 @@ FALLBACK_APPROACH_QUAT_XYZW = [-0.538, 0.482, -0.442, 0.532]
 # "향후 계획" 참고).
 WORLD_UP = (0.0, 0.0, 1.0)
 
-# 정렬(1/5)/후퇴(5/5) 위치와 직진 접근(3/5) 최종 목표(grasp_target_x,
-# 아래 GRIPPER_LENGTH_OFFSET_M 반영 후 값) 사이의 g_base X축 방향 거리(m).
-# g_base 원점 기준이 아니라 이 두 웨이포인트 간의 상대 간격임. 방위각이
-# ±75도 이내로 제한돼 있어 forward 방향이 대체로 g_base -X에 가까우므로,
-# 실제 3차원 forward축 대신 X축 단일 성분으로 근사함(look-at 방향 그대로
-# 쓰면 더 정확하지만 계산이 복잡해짐).
+# 정렬(1/5)/후퇴(5/5) 위치와 직진 접근(3/5) 최종 목표(그리퍼 길이 보정 후
+# flange 목표) 사이의 거리(m). g_base 원점 기준이 아니라 이 두 웨이포인트
+# 간의 상대 간격임.
 # [2026-07-28] 0.08 -> 0.04로 축소 — GRIPPER_LENGTH_OFFSET_M과 합쳐 정렬
 # 위치를 당기는 총량이 MIN_TARGET_RADIUS_M 체크 기준(정렬 위치 반지름
 # ≥0.08m)을 결정하는데, 실측 토마토 베드 거리(g_base 원점 기준 약 0.25m)
@@ -193,10 +190,190 @@ WORLD_UP = (0.0, 0.0, 1.0)
 # 반지름 0.255m 이상만 통과, 0.04로 줄이면 0.215m 이상까지 커버). 순수
 # 여유 마진이라(GRIPPER_LENGTH_OFFSET_M과 달리 실측 그리퍼 길이에 묶여
 # 있지 않음) 줄여도 물리적 근거가 깨지지 않음.
-APPROACH_OFFSET_X = 0.05 # 0.08
+#
+# [2026-07-30, 이름 변경 APPROACH_OFFSET_X -> APPROACH_STANDOFF_M] 예전엔
+# 이 간격을 g_base **X축 성분 하나로만** 뺐음("방위각이 ±75도 이내라 forward가
+# 대체로 g_base -X에 가깝다"는 근사). 그 근사가 깨진 지점이 이번 시뮬레이션
+# (타겟 (0.24,-0.02,z), z=0.40->0.14) 분석으로 드러남 — 방위각은 실제로 전
+# 구간 2.9~3.0도로 거의 0이어서 근사의 수평 논리는 맞았지만, **고도각을 전혀
+# 따지지 않았음**. 그리퍼 축(joint6_flange 로컬 +Z)을 g_base로 옮긴 forward의
+# 고도각이 z=0.40에서 +29도, z=0.14에서 -19도까지 흔들려서, X축 성분만 빼면
+# 손가락이 실제로 닿는 지점이 토마토에서 z로 +44mm(z=0.40) / -30mm(z=0.14)
+# 어긋났음(토마토 지름이 25~36mm이므로 양 끝에서 완전히 빗나감). 오차가
+# 최소(8mm)인 z≈0.26 근방에서만 근사가 성립했고, 실제로 그 시뮬레이션의
+# 성공 구간(z=0.26~0.38)이 오차 최소 구간과 정확히 겹쳤음.
+# 이제 이 값은 축 성분이 아니라 **접근축(forward) 방향 거리**임.
+#
+# [2026-07-30, 3차] 0.05 -> 0.03. 이 값이 **접근 고도각의 하한을 결정**한다는
+# 것이 RViz 스윕 관측으로 드러남(사용자 피드백: "z=0.24부터 팔이 위에서
+# 내려와 토마토를 지나가고 다시 아래에서 올라온다, 높이가 올라갈수록 심해짐").
+# 관계식:
+#     정렬 반지름 = 목표 반지름 - (GRIPPER_LENGTH_OFFSET_M + standoff)*cos(고도각)
+# 이 값이 MIN_ALIGN_RADIUS_M(0.13)을 넘어야 후보로 인정되므로, standoff가
+# 크면 정렬 위치가 베이스 쪽으로 깊이 당겨져 사각지대를 벗어나려면 더 급하게
+# 기울여야 함. 목표 반지름 0.241m 기준 실측:
+#     standoff 0.05 -> 최소 |고도각| 38도(실질 40도), 정렬 위치가 토마토보다
+#                      수직으로 90mm 벗어남
+#     standoff 0.03 -> 최소 25도, 우회 51mm
+#     standoff 0.025 -> 최소 20도, 우회 39mm
+# 즉 "위에서 내려와 지나쳤다가 아래에서 올라오는" 우회 동작의 크기가 이
+# 값에 직접 비례함. 0.03으로 줄여 우회를 90mm -> 51mm로 절반 가까이 낮추고,
+# 위에서 접근(음수 고도각)이 가능한 상한도 z≤0.26 -> z≤0.30으로 넓힘.
+# 위 주석대로 이 값은 실측에 묶이지 않은 순수 여유 마진이라 줄여도 물리적
+# 근거가 깨지지 않음. 더 줄이면(0.025) 우회가 더 작아지지만 직진 접근 구간이
+# 2.5cm로 짧아져 "접근다운 접근"이 아니게 되므로 3cm에서 멈춤.
+#
+# [2026-07-30, 4차] 0.03 -> 0.02. 목표 높이에 따라 고도각이 매끄럽게 변하려면
+# 중간 높이에서 **0도(직진)**가 실현 가능해야 하는데, 그 조건이
+#     목표 반지름 - (GRIPPER_LENGTH_OFFSET_M + standoff) >= MIN_ALIGN_RADIUS_M
+#     0.241 - (0.09 + standoff) >= 0.13  ->  standoff <= 0.021
+# 이라서 0.03으로는 0도가 항상 걸러졌음(그래서 최소 25도, 3차 관측에서
+# z=0.30 근방 ±25도 사이 50도 점프 = 사용자 관측 "0.3 근처부터 비틀어짐").
+# 대가: 직진 접근 구간이 2cm로 짧아지고, 정렬 반지름이 0.131로 하한
+# (MIN_ALIGN_RADIUS_M=0.13)에 붙어 예상 J1 스윙이 25도 -> 약 34도로 늘어남
+# (손목 오프셋 관계 asin(0.073/r), MIN_ALIGN_RADIUS_M 주석 참고).
+# 원래 코드(0.102 반지름, 46~57도)보다는 여전히 크게 낫고, 사용자가 명시적으로
+# 요구한 방향 프로파일을 얻는 대가로 받아들임.
+APPROACH_STANDOFF_M = 0.02 # 0.03 # 0.05 # 0.08
 
-# 직진 접근(3/5)이 이동하는 flange 목표 = 검출된 토마토 위치(target.x)에서
-# 이 값을 g_base X축으로 뺀 지점. 그리퍼는 flange 원점에 있지 않고 그보다
+# [2026-07-30, 접근축 고도각 탐색] 접근축(forward)의 고도각 후보(rad).
+# 예전에는 forward를 "현재 EE(=look pose) 위치 -> 목표" 방향으로 잡았는데,
+# 이건 접근 기하가 아니라 **팔이 지금 어디 있느냐**에 좌우되는 값이었음
+# (look pose flange가 g_base (-0.136,-0.035,0.241)에 있어서, 목표 높이에
+# 따라 고도각이 -19도~+29도로 끌려다님). 이제 방위각은 목표에서 바로 잡고
+# (atan2(target.y, target.x)), 고도각은 이 후보 목록에서 탐색함 — 즉
+# "어느 각도로 접근할지"가 우연이 아니라 설계 변수가 됨.
+#
+# 크기 순으로 정렬한 이유: 0도(수평 접근)가 가능하면 그걸 먼저 쓰고(기존
+# 동작과 동일), 안 되면 점점 기울여봄. 부호를 둘 다 넣은 이유는 낮은 목표는
+# 위에서(-), 높은 목표는 아래에서(+) 접근하는 쪽이 유리한데 그 판단을
+# 높이 공식으로 박아넣기보다 실제 IK 가능성과 관절 이동량으로 고르는 게
+# 낫다고 봤기 때문. 토마토는 거의 구형이라 접근 고도각이 파지 성공에
+# 영향이 없다는 기존 판단(ROLL_CANDIDATES_RAD 근거와 동일)을 그대로 씀.
+#
+# 이 목록이 예전 FORWARD_TILT_CANDIDATES_RAD(±6/±12도, J5 특이점 회피용
+# 폴백)를 흡수함 — 같은 "forward를 기울인다" 동작인데, 폴백이 아니라 1차
+# 탐색 차원으로 승격하면서 범위도 훨씬 넓혔음(그쪽 ±12도로는 아래 정렬
+# 반지름 문제를 벗어날 수 없었음).
+# [2026-07-30, 3차] 20도 간격(0/±20/±40/±50/±60)에서 촘촘하게 바꿈. 예전
+# 간격으로는 standoff 0.05의 하한(38도) 때문에 0/±20이 전부 정렬 반지름
+# 필터에 걸려 **실질 최소가 40도**였고, 그 결과 모든 접근이 급경사였음.
+# standoff를 0.03으로 줄여 하한이 25도로 내려왔으니 그 구간을 쓸 수 있게
+# ±10~±35를 채움. |고도각| 오름차순 + 같은 크기면 음수(위에서 접근) 먼저 —
+# _build_approach_elevation_candidates가 이 순서를 티어로 묶어 씀.
+# [2026-07-30, 4차] -60~+60도를 5도 간격으로 균일하게. 이제 후보 순서가
+# |고도각| 오름차순이 아니라 **"이상 고도각(아래 APPROACH_REFERENCE_POINT)에
+# 가까운 순"**이라, 사다리는 단순히 촘촘하고 균일하면 됨.
+APPROACH_ELEVATION_CANDIDATES_RAD = [
+    math.radians(d) for d in range(-60, 61, 5)
+]
+
+# [2026-07-30, 4차] 접근축의 "이상 고도각"을 정하는 기준점(g_base).
+#
+# 값은 look pose에서의 joint6_flange 위치 — SRDF look_pose group_state
+# (LOOK_POSE_JOINT_POSITIONS)로 URDF 순기구학을 돌려 얻은 값이고, 문서에
+# 실측으로 기록된 look pose 쿼터니언과 교차검증됨(오차 0.001).
+#
+# 왜 이 점인가: 팔은 목표를 받을 때 항상 look pose에 있고(카메라가 여기서
+# 봄), "보고 있는 자리에서 목표를 향해 곧게 다가간다"가 가장 자연스러운
+# 접근이기 때문. 이 기준점에서 목표를 향하는 방향의 고도각은
+#     z=0.14 -> -15도(위에서),  z=0.24 -> 0도(직진),  z=0.40 -> +23도(아래에서)
+# 로 **연속·단조**하게 변함 — 사용자가 요구한 "낮은 건 위에서, 같은 높이는
+# 직진, 높은 건 아래에서"가 공식 없이 그대로 나옴.
+#
+# 이력: 원래 코드도 이 방향을 썼는데(`forward = target - 현재 EE`), 두 가지가
+# 달랐음 — (1) 라이브 TF의 현재 EE를 썼기 때문에 팔이 look pose에 없으면
+# 접근축이 흔들렸고, (2) 정작 웨이포인트는 g_base X축 성분만 빼서 계산해
+# 접근축과 어긋났음(손가락 오차 최대 44mm). 즉 방향 프로파일 자체는 원래가
+# 맞았고, 버그는 축 불일치였음. 이제 기준점을 고정값으로 박아 (1)을 없애고,
+# 웨이포인트를 같은 축에서 계산해 (2)를 없앰.
+#
+# 3차(|고도각| 최소화)에서 z=0.30 근방에 -25도/+25도 50도 점프가 생겨
+# "비틀어진다"는 관측이 나온 것도 이 기준이 목표 높이를 전혀 안 봤기
+# 때문이었음.
+APPROACH_REFERENCE_POINT = [-0.1363, -0.0346, 0.2408]
+
+# 이상 고도각에서 이 각도 안쪽인 후보들을 한 티어로 묶어 함께 평가함(티어
+# 안에서는 관절 이동량 최소로 고름).
+#
+# [2026-07-30, 5차] 10도 -> 5도. 이 폭이 곧 **채택 고도각의 지터 크기**임이
+# RViz 스윕 로그로 확인됨 — 10도일 때 채택값이 이상값에서 최대 ±9.7도
+# 벗어나(딱 티어 폭에 갇힘) 인접 높이 간 고도각이 평균 8.1도, 최대 20도씩
+# 튀었음. 이상값 자체는 인접 높이 간 1.5도밖에 안 변하므로 **지터가 실제
+# 신호의 5~10배**였고, 크로스오버 근방에서 부호 뒤집힘도 2회 발생함
+# (0.23:-10도 -> 0.22:+5도, 0.21:+5도 -> 0.20:-15도). 인접한 토마토 두 개가
+# 눈에 보이게 다른 각도로 접근한다는 뜻.
+#
+# 5도면 티어 하나에 후보 2개(이상값을 사이에 두고 양쪽) × roll 12개 = 24개가
+# 함께 평가됨 — 예전에 고도각 하나만 보고 성급히 채택했을 때 걸렸던 함정
+# (J1이 150도 도는 IK 분기를 그대로 집는 문제)을 피할 비교 대상으로 24개는
+# 충분하다고 판단(그 함정은 후보 12개일 때 나왔음). 더 줄이면 후보가 1개로
+# 떨어져 그 함정에 다시 노출되므로 5도가 하한.
+APPROACH_ELEVATION_TIER_RAD = math.radians(5.0)
+
+# [2026-07-30, 어깨 특이점 회피] 정렬(1/5) 위치가 J1(베이스) 수직축에서
+# 최소 이만큼은 떨어져 있어야 후보로 인정함.
+#
+# 근거: mycobot 280 손목에는 약 7.3cm 측면 오프셋이 있음(URDF
+# joint6_to_joint5 origin (0, -0.07318, 0)). 그래서 flange를 반지름 r에
+# 두고 그리퍼를 반지름 방향으로 향하게 하려면 J1이 최소 asin(0.073/r)만큼
+# 돌아야 함. 관절공간 400만 샘플로 실측 확인한 값:
+#     r=0.10m -> J1 가능 범위 +57~+111도 (최소 57도)
+#     r=0.12m -> +41~+142도
+#     r=0.14m -> +34~+144도
+#     r=0.18m -> +25~+158도
+#     r=0.22m -> +18~+161도
+# look pose의 J1은 -7.5도이므로, 정렬 위치 반지름이 작으면 **매 사이클
+# 60~120도 베이스 스윙이 강제**됨. 예전 계산(X축 성분만 빼기)은 목표 높이와
+# 무관하게 정렬 위치를 항상 반지름 0.102m에 놓아서(타겟 (0.24,-0.02,z)의
+# 경우 항상 (0.10,-0.02,z)) 이 스윙을 항상 물고 있었음 — 사용자 관측
+# "몸을 틀면서 이동한다" / "관절이 꼬인다"의 정체가 이것이었음.
+# 반면 토마토 자체는 반지름 0.241m로 최소 J1이 17도뿐 — 관절을 풀고 수동으로
+# 목표까지 가면 쉬운 이유가 이것(사각지대는 목표가 아니라 14cm 반경 후퇴가
+# 만들어낸 것).
+# 0.13m로 잡은 근거: 위 표에서 이 근방부터 필요 J1이 20도대로 떨어짐(0.10m의
+# 57도 대비 절반 이하). 더 키우면 더 좋지만 그만큼 접근 고도각이 급해져서
+# (align 반지름 = 목표 반지름 - APPROACH_STANDOFF_M*cos(고도각) 관계상
+# 반지름 0.241m 목표에서 0.15m를 넘기려면 고도각 50도 이상이 필요) 실제
+# 도달 가능한 후보가 줄어드는 트레이드오프가 있음.
+MIN_ALIGN_RADIUS_M = 0.13
+
+# [2026-07-30] 어깨(J2 회전축) 위치와 도달 가능 거리 — 후보 정렬/거부 기준.
+# SHOULDER_HEIGHT_M은 URDF joint2_to_joint1의 origin z(0.13156) 그대로.
+# MAX_SHOULDER_DISTANCE_M은 관절공간 200만 샘플로 측정한 flange 최대 도달
+# 거리 0.302m에 여유를 둔 값 — 이 필터가 없어서 시뮬레이션의 z=0.40/0.39
+# 목표가 "플래닝 실패"로만 나타났음(flange 목표가 어깨에서 0.308m라 애초에
+# 작업공간 밖이었는데, 그걸 알려주는 로그가 없어서 원인 파악이 늦어졌음).
+SHOULDER_HEIGHT_M = 0.13156
+MAX_SHOULDER_DISTANCE_M = 0.29
+
+# [2026-07-30, 2차 — RViz FakeSystem 스윕 로그 분석] 정렬 위치에만 따로 걸는,
+# 더 빡빡한 도달 거리 한계.
+#
+# 왜 flange와 따로 두는가: 처음엔 "두 웨이포인트 중 먼 쪽이 flange"라고 보고
+# flange만 검사했는데, 그 전제가 틀렸음 — 고도각이 음수(위에서 접근)면 두
+# 웨이포인트가 모두 위/뒤로 가면서 **정렬 위치가 flange보다 더 멀어짐**
+# (z=0.29 실측: flange 0.276m, 정렬 0.282m). 그래서 정렬 위치가 도달 한계
+# 근처로 빠져나가는 걸 못 걸렀음.
+#
+# 왜 0.26인가: 스윙 스윕 25개 사이클에서 정렬 위치의 어깨거리로 정렬해보면
+# 후퇴(5/5) Cartesian 실패가 완벽히 갈림 —
+#     정렬거리 ≤0.255m : 17개 사이클, 후퇴 Cartesian 실패 0건
+#     정렬거리 ≥0.263m :  8개 사이클, 전부 문제 발생
+#                        (후퇴 fraction 0.05~0.85 또는 정렬 플랜 실패)
+# 후퇴는 flange에서 정렬 위치로 **되돌아 뻗는** 구간이라, 정렬 위치가 도달
+# 한계(실측 0.302m)의 87%를 넘으면 Cartesian 보간이 특이점에 걸려 무너짐.
+# 0.26m = 한계의 86%.
+#
+# 반대로 flange 쪽은 이만큼 조일 필요가 없음 — 고도각이 양수일 때 먼 쪽은
+# flange이고, 그 방향 이동은 접근(3/5)인데 실측에서 flange 0.266m까지
+# 접근 dry-run이 문제없이 통과했음(z=0.39, +60도). 그래서 flange는
+# MAX_SHOULDER_DISTANCE_M(0.29) 유지, 정렬 위치만 이 값으로 조임.
+MAX_ALIGN_SHOULDER_DISTANCE_M = 0.26
+
+
+# 직진 접근(3/5)이 이동하는 flange 목표 = 검출된 토마토 위치에서 이 값을
+# 접근축(forward) 반대 방향으로 뺀 지점. 그리퍼는 flange 원점에 있지 않고 그보다
 # 앞으로 뻗어나간 손가락 위치에서 물체를 물기 때문에, flange를 토마토
 # 위치 자체로 보내면 손가락(파지점)은 이미 그만큼 더 깊이 들어간 상태가
 # 됨 — 이 값은 그 차이를 미리 빼서 파지점이 실제 토마토 위치에 오도록
@@ -208,12 +385,14 @@ APPROACH_OFFSET_X = 0.05 # 0.08
 # 그리퍼가 목표를 지나쳐서(overshoot, 너무 깊이 들어감) → 이 값을 키움(flange를 더 뒤로 당김)
 # 그리퍼가 목표에 못 미침(undershoot, 너무 짧게 감) → 이 값을 줄임(flange를 덜 당김, 목표에 더 가깝게)
 # [2026-07-28] 실측 그리퍼 길이(90mm)보다 크게 키우지 말 것 — 이 값 +
-# APPROACH_OFFSET_X가 정렬 위치를 베이스 쪽으로 당기는 총량이라, 너무 크면
+# APPROACH_STANDOFF_M이 정렬 위치를 베이스 쪽으로 당기는 총량이라, 너무 크면
 # 가까운 목표(반지름 20cm대)의 정렬 위치가 베이스 근처 도달 불가 사각지대
-# (반지름 <8cm)에 빠짐 — 0.15로 테스트 중 재현 확인(_on_target_point의
-# 정렬 위치 반지름 체크가 이제 이 경우를 미리 거름). overshoot이 남아있다면
+# (반지름 <8cm)에 빠짐 — 0.15로 테스트 중 재현 확인. overshoot이 남아있다면
 # 이 값이 아니라 depth 추정 자체(DEPTH_SAFETY_MARGIN_M,
 # yolo_d435_detector_node.py)를 의심할 것.
+# [2026-07-30] 위 사각지대 문제는 이제 두 방향으로 대응됨 — (1) 두 웨이포인트를
+# 접근축 위에서 계산하므로 고도각을 기울이면 당기는 방향이 베이스 정면이
+# 아니게 되고, (2) MIN_ALIGN_RADIUS_M 필터가 후보 단계에서 사각지대를 거름.
 # [2026-07-28, 실물 검증] 0.095로 실물 테스트 — g_base (0.32, 0.039, 0.307)
 # 목표에 flange가 실제 토마토 위치에 정확히 도착함(육안 확인, sync_plan
 # 경유 실물 이동). 90mm 실측치에서 5mm만 더 보정한 값.
@@ -254,7 +433,7 @@ WRIST_LINK_NAMES = ['joint5', 'joint6']
 OCTOMAP_CLEAR_DELAY_SEC = 1.2
 
 # [2026-07-27] "직진 접근"/"후퇴"(3/5, 5/5단계)는 이미 유효하다고 검증된
-# 정렬 위치에서 같은 orientation을 유지한 채 직선으로 짧게(APPROACH_OFFSET_X)
+# 정렬 위치에서 같은 orientation을 유지한 채 직선으로 짧게(APPROACH_STANDOFF_M)
 # 이동하는 것뿐인데, OMPL 조인트공간 샘플링(RRTConnect)은 매번 완전히 새로운
 # 목표를 무작위로 찾으려 해서 "Unable to sample any valid states for goal
 # tree"로 반복 실패함(mock 스택으로 여러 좌표에서 재현 확인, compute_ik
@@ -327,7 +506,28 @@ PLANNING_ATTEMPTS = 10
 # 이어지는 구간까지 남은 것으로 판단됨.
 # 결론: 떨림은 scaling에 대해 U자 곡선 — 너무 느리면 도착-정지가 보이고,
 # 너무 빠르면 구조 진동이 생김. 실측상 0.35가 최선(0.2보다 "많이 줄었다").
-VELOCITY_SCALING = 0.35 #0.5 #0.2 #0.1
+#
+# [2026-07-30, 4차 — 0.35 -> 0.5, 접근축 리팩터 이후] 사용자 재조정: "너무
+# 느려서. 이렇게 하니 좀 더 부드럽게 빨리 움직여".
+#
+# 위 3차 결론과 정면으로 충돌하지만, 그 사이에 **U자 곡선이 이동했을 근거**가
+# 있음: 3차 관측 당시 정렬 위치는 목표 높이와 무관하게 항상 반지름 0.102m
+# 였고(X축 성분만 빼서 계산하던 시절), 손목 측면 오프셋 때문에 J1이 매 사이클
+# 60~120도 스윙해야 했음. 3차가 지목한 원인이 바로 그 "빠른 대각도 스윙이
+# 팔 구조를 울린다"였는데, 접근축 리팩터로 정렬 반지름이 0.131~0.146m로
+# 올라가 필요 J1 스윙이 약 34도로 줄었음(MIN_ALIGN_RADIUS_M 주석의 손목
+# 오프셋 표 참고). 즉 진동의 입력 자체가 작아졌으므로 최적점이 위로 옮겨간
+# 것으로 설명됨.
+#
+# **실물 검증됨** (2026-07-30, sync_plan 경유). 3차의 0.35도 실물 관측으로
+# 정한 값이었으므로 같은 조건에서 결론이 뒤집힌 것이고, 따라서 위 "U자 곡선이
+# 이동했다"는 설명이 실물 근거로 뒷받침됨 — 접근축 리팩터가 속도 여유까지
+# 벌어준 셈. 3차의 "0.5는 과했음"은 그 시절 기하(정렬 반지름 0.102m,
+# J1 스윙 60~120도)에 한정된 결론으로 읽을 것.
+#
+# 상한은 여전히 위 ⚠️의 0.65(서보 speed 상한) — 그건 기하와 무관한
+# SPEED_GAIN_K 천장이므로 이번 변경으로 완화되지 않음.
+VELOCITY_SCALING = 0.5 #0.35 #0.5 #0.2 #0.1
 ACCELERATION_SCALING = 0.25 #0.35 #0.1
 
 # 후퇴(5/5) + look pose 복귀 구간(그리퍼가 물체를 쥔 채 움직이는 유일한
@@ -416,8 +616,26 @@ GRASP_STEP_RETREAT = 5
 # 맞아 좌표가 엉뚱하게 계산된 사고)인데, 이건 로봇 구조와 무관하게 TF
 # 기반 좌표 파이프라인이면 어디서나 날 수 있는 소프트웨어 버그 패턴이라
 # 참고한 것뿐 — 값 자체와는 무관함.
+# [2026-07-30] MAX 0.45 -> 0.29. 0.45는 실제 도달 한계보다 15cm나 커서 아무것도
+# 걸러내지 못하는 상수였음 — URDF 순기구학으로 관절공간 200만 샘플을 돌려
+# flange가 실제로 도달 가능한 최대 반지름이 0.302m(어깨 J2축 기준 최대 거리도
+# 같은 0.302m — 최대 도달 자세가 어깨 높이 수평 자세라서)임을 확인함.
+#
+# [2026-07-30, 정정] 0.29 -> 0.38. 위 0.29는 **틀렸음** — flange의 도달 한계를
+# 재서 그걸 그대로 *토마토* 위치 게이트에 걸었는데, flange는 토마토까지 갈
+# 필요가 없음(GRIPPER_LENGTH_OFFSET_M=0.09만큼 앞에서 멈추고 손가락이 나머지를
+# 감당함). 그래서 토마토는 그만큼 더 멀 수 있는데도 거부됐음 — 이 파일 주석에
+# "[2026-07-28, 실물 검증]"으로 기록된 좌표 (0.32, 0.039, 0.307)(반지름 0.322)가
+# 실제로 거부되는 것을 사용자 제보로 확인함(수동 발행이 무반응).
+# 올바른 상한 ≈ flange 최대 반지름(0.302) + 그리퍼 길이(0.09) = 0.39 -> 0.38로
+# 여유를 둠.
+#
+# 이 게이트는 어디까지나 "좌표가 말이 되는지" 거르는 느슨한 안전망임 —
+# 실제 도달 가능성은 후보마다 MAX_SHOULDER_DISTANCE_M(flange)과
+# MAX_ALIGN_SHOULDER_DISTANCE_M(정렬 위치)이 정확히 판정하므로, 이 값을
+# 도달 한계에 맞춰 조이려 하지 말 것(그게 이번 회귀의 원인이었음).
 MIN_TARGET_RADIUS_M = 0.08
-MAX_TARGET_RADIUS_M = 0.45
+MAX_TARGET_RADIUS_M = 0.38
 MAX_TARGET_AZIMUTH_DEG = 75.0
 
 # [2026-07-24, roll 후보 탐색] look-at 방식(방식 B)이 WORLD_UP 기준으로 고정하는
@@ -436,7 +654,12 @@ ROLL_CANDIDATE_IK_TIMEOUT_SEC = 0.05
 # 확률적 솔버임이 실측으로 확인됨(2026-07-24, 같은 조건 10회 호출에 성공 7~9회
 # 정도로 편차 있었음). 후보 하나를 한 번만 시도하면 실제로 풀리는 후보를
 # 운 나쁘게 놓칠 수 있어, 후보마다 몇 번 재시도한 뒤 다음 후보로 넘어감.
-ROLL_CANDIDATE_IK_RETRIES = 3
+# [2026-07-30] 3 -> 2. 탐색 공간이 roll 12개에서 (고도각 최대 6개 × roll 12개)로
+# 커졌으므로 후보당 재시도를 줄여 최악 지연을 묶음: 6×12×2 = 144회 × 0.05s
+# 타임아웃 ≈ 7초(3회면 10.8초). 실패한 후보만 타임아웃 전부를 쓰므로 통상은
+# 1~2초. 이 지연은 예전 "정렬 5회 재시도"(회당 약 2초, 최악 10초 이상)를
+# 대체하는 것이므로 전체적으로는 오히려 짧아짐.
+ROLL_CANDIDATE_IK_RETRIES = 2
 
 # [2026-07-29, 손목 특이점 회피] joint6_to_joint5(J5, "wrist pitch")가 0
 # 근처면 이 손목 구조(J4·J6 회전축이 J5=0에서 거의 겹치는 spherical wrist)
@@ -445,17 +668,16 @@ ROLL_CANDIDATE_IK_RETRIES = 3
 # look pose 복귀 전부에서 발생). roll 후보(ROLL_CANDIDATES_RAD)는 순수하게
 # forward축 둘레 회전이라 J6만 바꾸고 J5엔 거의 영향이 없어 이 문제를 못
 # 잡음 — 대신 forward(목표 지향) 벡터의 고도각을 살짝 틀어서 J5 자체를
-# 특이점에서 떨어뜨림(_tilt_forward_vector, _on_roll_candidate_result 참고).
+# 특이점에서 떨어뜨림. [2026-07-30] 그 "기울이기"가 이제 폴백이 아니라 1차
+# 탐색 차원임 — APPROACH_ELEVATION_CANDIDATES_RAD /
+# _build_approach_elevation_candidates / _try_next_roll_candidate 참고.
 WRIST_PITCH_JOINT_NAME = 'joint6_to_joint5'
 WRIST_SINGULARITY_MARGIN_RAD = math.radians(8.0)
-# 0도(원래 방향)부터 시도하고, 안 되면 점점 더 크게 기울여봄. 토마토는 거의
-# 구형이라 접근 고도각이 이 정도 틀어져도 파지 성공에는 영향이 없다고 판단
-# (기존 roll 무관 판단과 같은 근거).
-FORWARD_TILT_CANDIDATES_RAD = [
-    0.0,
-    math.radians(6.0), math.radians(-6.0),
-    math.radians(12.0), math.radians(-12.0),
-]
+# [2026-07-30] 예전 FORWARD_TILT_CANDIDATES_RAD(0, ±6, ±12도)는
+# APPROACH_ELEVATION_CANDIDATES_RAD로 흡수됨(위 설명 참고). 폴백이 아니라
+# 1차 탐색 차원이 되었고 범위도 ±60도까지 넓어졌음 — J5 특이점 회피는
+# 그대로 유지되며, 이제 "다음 고도각 후보로 넘어간다"는 같은 동작이
+# 어깨 특이점(MIN_ALIGN_RADIUS_M) 회피와 한 루프에서 처리됨.
 
 # ---- 그리퍼 임시 충돌 형상 ----
 # [2026-07-29 정정] 이 코드가 처음 작성될 때는 URDF에 그리퍼가 없었지만,
@@ -519,28 +741,44 @@ def _angle_delta(a_rad: float, b_rad: float) -> float:
     return abs(math.atan2(math.sin(diff), math.cos(diff)))
 
 
-def _tilt_forward_vector(forward, tilt_rad):
-    """forward 벡터의 고도각(elevation)만 tilt_rad만큼 더하고 방위각
-    (azimuth)과 크기는 그대로 유지함. [2026-07-29, 손목 특이점 회피] 참고 —
-    순수 roll 회전(forward축 둘레)과 달리 이건 forward 자체의 방향을 바꿔
-    IK가 요구하는 J5(wrist pitch) 값을 실제로 움직이기 위한 것."""
-    if tilt_rad == 0.0:
-        return list(forward)
-    dx, dy, dz = forward
-    horizontal = math.hypot(dx, dy)
-    magnitude = math.sqrt(dx * dx + dy * dy + dz * dz)
-    if magnitude < 1e-9 or horizontal < 1e-9:
-        return list(forward)
-    azimuth = math.atan2(dy, dx)
-    elevation = math.atan2(dz, horizontal)
-    new_elevation = elevation + tilt_rad
-    new_horizontal = magnitude * math.cos(new_elevation)
-    new_dz = magnitude * math.sin(new_elevation)
+def _forward_unit_vector(azimuth_rad: float, elevation_rad: float):
+    """방위각/고도각(rad)에서 단위 접근축(forward) 벡터를 만듦.
+
+    [2026-07-30] 이 함수가 예전 `_tilt_forward_vector`(기존 forward의 고도각을
+    상대적으로 틀던 것) + `_compute_forward_vector`(현재 EE 위치에서 목표를
+    향하던 것)를 대체함. 접근축을 "팔이 지금 어디 있느냐"에서 떼어내
+    목표 방위각 + 설계된 고도각으로 직접 구성하는 것이 핵심 —
+    APPROACH_ELEVATION_CANDIDATES_RAD 설명 참고.
+    """
+    horizontal = math.cos(elevation_rad)
     return [
-        new_horizontal * math.cos(azimuth),
-        new_horizontal * math.sin(azimuth),
-        new_dz,
+        horizontal * math.cos(azimuth_rad),
+        horizontal * math.sin(azimuth_rad),
+        math.sin(elevation_rad),
     ]
+
+
+def _waypoints_along_forward(target: Point, forward):
+    """접근축(단위 forward)을 따라 flange 목표와 정렬 위치를 계산.
+
+    [2026-07-30] 예전에는 두 값을 g_base X축 성분만 빼서 구했음
+    (`target.x - GRIPPER_LENGTH_OFFSET_M`, 다시 `- APPROACH_OFFSET_X`).
+    그리퍼 축은 joint6_flange 로컬 +Z이고 그걸 g_base로 옮긴 것이 바로 이
+    forward인데, 그 축이 g_base +X와 최대 29도까지 벌어지므로 X 성분만
+    빼면 손가락이 닿는 지점이 목표에서 크게 어긋났음(APPROACH_STANDOFF_M
+    주석의 실측 오차 표 참고). 이제 두 웨이포인트 모두 같은 forward 축
+    위에 놓여서, 직진 접근(3/5)이 실제로 **그리퍼 축 방향 직선 이동**이 됨
+    (예전에는 그리퍼가 비스듬히 향한 채 X축으로 평행이동해서 손가락이
+    목표를 옆으로 스치는 꼴이었고, 그래서 Cartesian fraction이 성공
+    구간에서조차 0.85~0.90에 머물러 후퇴가 매번 OMPL 폴백으로 빠졌음).
+    """
+    origin = [target.x, target.y, target.z]
+    flange = [c - GRIPPER_LENGTH_OFFSET_M * f for c, f in zip(origin, forward)]
+    align = [
+        c - (GRIPPER_LENGTH_OFFSET_M + APPROACH_STANDOFF_M) * f
+        for c, f in zip(origin, forward)
+    ]
+    return flange, align
 
 
 def _target_radius_azimuth(target: Point):
@@ -678,6 +916,8 @@ class CoordToGoalNode(Node):
         self._clear_timer = None
         self._pending_approach_position = None
         self._pending_target_position = None
+        # [2026-07-30] 원본 목표(토마토) 위치 — 접근축 후보를 만드는 기준.
+        self._pending_tomato_position = None
         # [2026-07-27, 그리퍼 폭 동적화] target_radius_m 구독으로 받은 최신값을
         # 캐시해뒀다가, target_point 수신 시점에 스냅샷해서 그 사이클 동안은
         # 고정(다음 검출 사이클의 반지름이 끼어들지 않도록). 아직 한 번도
@@ -721,16 +961,21 @@ class CoordToGoalNode(Node):
         self._ik_client = self.create_client(
             GetPositionIK, '/compute_ik', callback_group=callback_group
         )
-        self._roll_search_forward = None
+        # [2026-07-30] 접근축 후보(고도각) 목록과 그 안의 현재 인덱스 —
+        # _build_approach_elevation_candidates가 목표마다 새로 만듦.
+        self._approach_candidates = []
+        self._approach_candidate_index = 0
         self._roll_search_index = 0
         self._roll_search_retry = 0
         # [2026-07-28, 전체 관절 이동량 최소화] 후보 전수 조사 중 "6축 관절
         # 이동량 합이 가장 적은" 후보를 기억해두는 상태(아래
         # _try_next_roll_candidate/_on_roll_candidate_result 참고).
         self._roll_search_current_joint_positions = None
-        self._roll_search_best_delta = None
-        self._roll_search_best_quat = None
-        self._roll_search_best_roll_rad = None
+        # [2026-07-30] 고도각 × roll 전역 훑기의 최적해 두 칸 — J5 특이점을
+        # 피한 해(_roll_search_best)를 우선하고, 그런 해가 없을 때만
+        # _roll_search_best_singular로 폴백함(_on_roll_candidate_result 참고).
+        self._roll_search_best = None
+        self._roll_search_best_singular = None
 
         # target_object <-> 그리퍼 링크 충돌 허용(위 GRIPPER_LINK_NAMES 설명
         # 참고). 이 시점(__init__)은 아직 executor가 이 노드를 spin하기 전이라
@@ -973,40 +1218,28 @@ class CoordToGoalNode(Node):
         if not self._is_target_within_safe_range(target):
             return
 
-        # [2026-07-27, 실물 파지 정확도] flange가 실제로 이동할 목표(파지
-        # 지점)만 그리퍼 길이만큼 당김(위 GRIPPER_LENGTH_OFFSET_M 설명 참고).
-        # target(원본, 실제 토마토 위치)은 안전 범위 검증/Octomap 클리어용
-        # CollisionObject에 그대로 쓰고, 이 보정된 값만 정렬/직진 접근 목표로 씀.
-        grasp_target_x = target.x - GRIPPER_LENGTH_OFFSET_M
-        approach_position = [grasp_target_x - APPROACH_OFFSET_X, target.y, target.z]
-
-        # [2026-07-28] 원본 target은 MIN_TARGET_RADIUS_M 범위 안이어도,
-        # GRIPPER_LENGTH_OFFSET_M+APPROACH_OFFSET_X만큼 베이스 쪽으로 당긴
-        # 정렬 위치는 그 범위 밖(베이스 근처 도달 불가 사각지대)으로 빠질 수
-        # 있음 — 가까운 목표(반지름 20cm대)에서 실측 재현 확인(정렬이 매번
-        # STATUS_ABORTED). target과 같은 최소 반지름 기준으로 정렬 위치도
-        # 검증.
-        approach_radius = math.hypot(approach_position[0], approach_position[1])
-        if approach_radius < MIN_TARGET_RADIUS_M:
-            self.get_logger().error(
-                f'정렬 위치 반지름({approach_radius:.3f}m)이 최소 안전 반지름'
-                f'({MIN_TARGET_RADIUS_M}m) 미만 — GRIPPER_LENGTH_OFFSET_M+'
-                f'APPROACH_OFFSET_X가 목표를 베이스 근처 도달 불가 지점까지 '
-                f'당김. 실행 거부: target=({target.x:.3f}, {target.y:.3f}, '
-                f'{target.z:.3f}), approach={[round(c, 3) for c in approach_position]}'
-            )
-            return
-
+        # [2026-07-30, 순서 반전] 예전에는 여기서 flange 목표와 정렬 위치를
+        # g_base X축 성분만 빼서 바로 확정하고, 그 다음에야 orientation(접근축)을
+        # 찾았음 — 즉 위치를 먼저 박고 방향을 나중에 맞추는 순서였고, 그래서
+        # 두 값이 서로 다른 축을 가리키는 모순이 생겼음(_waypoints_along_forward
+        # 주석 참고). 이제 접근축(forward)을 먼저 탐색하고, 채택된 축 위에서
+        # 두 웨이포인트를 계산함(_try_next_approach_candidate ->
+        # _finalize_planning). 여기서는 원본 목표만 저장함.
+        #
+        # 정렬 위치의 반지름 검증도 여기서 못 함 — 후보마다 값이 달라지므로
+        # 탐색 루프 안의 MIN_ALIGN_RADIUS_M 필터로 옮겼음. 예전 게이트가
+        # MIN_TARGET_RADIUS_M(0.08)을 재사용해서 반지름 0.102m 정렬 위치를
+        # 그대로 통과시켰던 것이 이 사각지대를 못 잡은 이유였음.
         self._busy = True
         self._align_retry_count = 0
         self._publish_target_collision_object(target)
-        self._pending_approach_position = approach_position
-        self._pending_target_position = [grasp_target_x, target.y, target.z]
+        self._pending_tomato_position = [target.x, target.y, target.z]
+        self._pending_approach_position = None
+        self._pending_target_position = None
         self._pending_target_radius_m = self._latest_target_radius_m
         self.get_logger().info(
-            f'목표 지점({target.x:.3f}, {target.y:.3f}, {target.z:.3f}), '
-            f'그리퍼 길이 보정 후 flange 목표 x={grasp_target_x:.3f}에 '
-            f'Octomap 클리어용 구 등록'
+            f'목표 지점({target.x:.3f}, {target.y:.3f}, {target.z:.3f})에 '
+            'Octomap 클리어용 구 등록'
         )
 
         if self._require_grasp_confirmation:
@@ -1151,40 +1384,112 @@ class CoordToGoalNode(Node):
         scene.world.collision_objects = [collision_object]
         self._planning_scene_publisher.publish(scene)
 
-    def _compute_forward_vector(self, target_position):
-        """현재 end-effector 위치 -> 목표 위치 방향 벡터(정규화 안 됨)를
-        계산. TF 조회 실패나 목표가 현재 위치와 거의 같은 경우(degenerate)엔
-        None을 반환함(호출부에서 고정 orientation으로 폴백).
+    def _build_approach_elevation_candidates(self):
+        """이 목표에 대해 실제로 시도할 만한 접근 고도각 후보 목록을 만듦.
+
+        [2026-07-30] APPROACH_ELEVATION_CANDIDATES_RAD를 그대로 쓰지 않고,
+        정렬 위치 반지름이 MIN_ALIGN_RADIUS_M을 넘는 것만 남김. 정렬 위치
+        반지름은 대략 (목표 반지름 - (그리퍼 길이+standoff)*cos(고도각))이라
+        고도각이 급할수록 커짐 — 즉 이 필터가 "베이스 근처 사각지대를 피할
+        만큼 기울인 접근축만 후보로 인정한다"가 됨(MIN_ALIGN_RADIUS_M 주석의
+        손목 오프셋/J1 스윙 설명 참고).
+
+        목록은 |고도각| 오름차순이므로, 수평 접근(0도)이 이미 충분한 반지름을
+        확보하는 먼 목표에서는 기존 동작이 그대로 유지되고, 가까운 목표에서만
+        점점 기운 접근을 쓰게 됨.
         """
-        try:
-            ee_transform = self._tf_buffer.lookup_transform(
-                BASE_LINK_NAME,
-                END_EFFECTOR_NAME,
-                Time(),
-                timeout=Duration(seconds=1.0),
-            )
-        except (
-            tf2_ros.LookupException,
-            tf2_ros.ConnectivityException,
-            tf2_ros.ExtrapolationException,
-        ) as exc:
-            self.get_logger().warn(
-                f'현재 EE 위치 TF 조회 실패, 고정 orientation으로 폴백: {exc}'
-            )
-            return None
+        target = Point()
+        target.x, target.y, target.z = self._pending_tomato_position
+        azimuth_rad = math.atan2(target.y, target.x)
 
-        ee_translation = ee_transform.transform.translation
-        ee_position = [ee_translation.x, ee_translation.y, ee_translation.z]
-        forward = [t - e for t, e in zip(target_position, ee_position)]
+        # 이상 고도각 = 기준점(look pose flange)에서 목표를 향하는 방향의
+        # 고도각 (위 APPROACH_REFERENCE_POINT 설명 참고).
+        delta = [
+            t - r for t, r in zip(self._pending_tomato_position, APPROACH_REFERENCE_POINT)
+        ]
+        ideal_elevation_rad = math.atan2(delta[2], math.hypot(delta[0], delta[1]))
 
-        if math.sqrt(sum(c * c for c in forward)) < 1e-6:
-            self.get_logger().warn(
-                '목표가 현재 EE 위치와 거의 같아 forward 벡터가 degenerate함, '
-                '고정 orientation으로 폴백'
+        candidates = []
+        near_base = []
+        out_of_reach = []
+        for elevation_rad in APPROACH_ELEVATION_CANDIDATES_RAD:
+            forward = _forward_unit_vector(azimuth_rad, elevation_rad)
+            flange, align = _waypoints_along_forward(target, forward)
+            align_radius = math.hypot(align[0], align[1])
+            elevation_deg = math.degrees(elevation_rad)
+
+            if align_radius < MIN_ALIGN_RADIUS_M:
+                near_base.append((elevation_deg, align_radius))
+                continue
+
+            # 두 웨이포인트를 각각 다른 한계로 검사함 — 어느 쪽이 더 먼지는
+            # 고도각 부호에 따라 뒤집히고, 방향별로 무너지는 양상도 다름
+            # (MAX_ALIGN_SHOULDER_DISTANCE_M 주석 참고).
+            shoulder = [0.0, 0.0, SHOULDER_HEIGHT_M]
+            flange_distance = math.dist(flange, shoulder)
+            align_distance = math.dist(align, shoulder)
+            if flange_distance > MAX_SHOULDER_DISTANCE_M:
+                out_of_reach.append(
+                    (elevation_deg, 'flange', flange_distance, MAX_SHOULDER_DISTANCE_M)
+                )
+                continue
+            if align_distance > MAX_ALIGN_SHOULDER_DISTANCE_M:
+                out_of_reach.append(
+                    (elevation_deg, '정렬', align_distance, MAX_ALIGN_SHOULDER_DISTANCE_M)
+                )
+                continue
+
+            candidates.append(
+                {
+                    'elevation_rad': elevation_rad,
+                    'forward': forward,
+                    'flange': flange,
+                    'align': align,
+                    'align_radius': align_radius,
+                    'align_shoulder_distance': align_distance,
+                    # 정렬 위치가 토마토에서 수직으로 벗어난 양 — "지나쳤다가
+                    # 되돌아오는" 우회 동작의 크기.
+                    'vertical_detour_m': abs(align[2] - target.z),
+                    # 이상 고도각에서 얼마나 벗어난 후보인지 — 정렬/티어 기준.
+                    'elevation_error_rad': abs(elevation_rad - ideal_elevation_rad),
+                }
             )
-            return None
 
-        return forward
+        if near_base:
+            self.get_logger().info(
+                '접근 고도각 후보 중 정렬 위치가 베이스 근처 사각지대'
+                f'(반지름 <{MIN_ALIGN_RADIUS_M}m)에 빠지는 것 제외: '
+                + ', '.join(f'{deg:.0f}도(r={r:.3f}m)' for deg, r in near_base)
+            )
+        if out_of_reach:
+            self.get_logger().info(
+                '접근 고도각 후보 중 웨이포인트가 도달 한계 밖인 것 제외: '
+                + ', '.join(
+                    f'{deg:+.0f}도({which} {d:.3f}m>{limit}m)'
+                    for deg, which, d, limit in out_of_reach
+                )
+            )
+
+        # [2026-07-30, 4차] 정렬 기준 = 이상 고도각에 가까운 순.
+        #
+        # 이력: (2차) 어깨거리 순 + 전역 관절이동량 최소 -> 동작의 모양을 전혀
+        # 평가하지 않아 높은 목표를 아래에서 퍼올림. (3차) |고도각| 최소 ->
+        # 우회량은 줄었지만 목표 높이를 안 보기 때문에 z=0.30 근방에서
+        # -25도/+25도가 갈려 50도 점프가 생김("비틀어진다"). (4차, 현재)
+        # 이상 고도각(기준점->목표 방향)에 가까운 순 -> atan2라 목표 높이에
+        # 대해 연속·단조이므로 점프가 원리적으로 생길 수 없고, 낮은 목표는
+        # 위에서 / 중간은 직진 / 높은 목표는 아래에서가 자동으로 나옴.
+        candidates.sort(key=lambda c: c['elevation_error_rad'])
+        if candidates:
+            self.get_logger().info(
+                f'이상 접근 고도각 {math.degrees(ideal_elevation_rad):+.1f}도'
+                f'(기준점->목표 방향) — 가까운 순 후보: '
+                + ', '.join(
+                    f'{math.degrees(c["elevation_rad"]):+.0f}도'
+                    for c in candidates[:8]
+                )
+            )
+        return candidates
 
     def _start_planning(self) -> None:
         self._clear_timer.cancel()
@@ -1193,17 +1498,20 @@ class CoordToGoalNode(Node):
         if self._clear_octomap_client.service_is_ready():
             self._clear_octomap_client.call_async(Empty.Request())
 
-        forward = self._compute_forward_vector(self._pending_target_position)
-        if forward is None:
-            self._finalize_planning(FALLBACK_APPROACH_QUAT_XYZW)
+        self._approach_candidates = self._build_approach_elevation_candidates()
+        if not self._approach_candidates:
+            # 어떤 고도각으로도 사각지대를 벗어나지 못하는 목표 — 예전처럼
+            # 수평 접근으로 강행하는 대신, 팔을 꼬아가며 실패할 것이 예측되는
+            # 상황이므로 실행을 거부함(로그로 사유를 남겨 목표 위치 자체를
+            # 재검토할 수 있게 함).
+            self._abort_to_return(
+                f'접근축을 어떻게 기울여도 정렬 위치가 최소 반지름'
+                f'({MIN_ALIGN_RADIUS_M}m)을 확보하지 못함 — 목표가 베이스에 '
+                f'너무 가까움: {[round(c, 3) for c in self._pending_tomato_position]}'
+            )
             return
 
-        # [2026-07-29, 손목 특이점 회피] 재탐색 시 기준이 되는 원래(안 기운)
-        # forward — FORWARD_TILT_CANDIDATES_RAD는 항상 이 값에서부터 상대
-        # 틸트를 적용함(누적 틸트 방지).
-        self._roll_search_base_forward = forward
-        self._roll_search_tilt_index = 0
-        self._roll_search_forward = forward
+        self._approach_candidate_index = 0
         self._roll_search_index = 0
         self._roll_search_retry = 0
         # [2026-07-28, 전체 관절 이동량 최소화] 정렬 시작 시점의 6축 관절각을
@@ -1211,10 +1519,8 @@ class CoordToGoalNode(Node):
         # 기준점. joint_states를 아직 못 받았으면 None(이 경우 아래에서
         # 기존처럼 "첫 feasible 후보 즉시 채택" 동작으로 폴백).
         self._roll_search_current_joint_positions = self._get_current_arm_joint_positions()
-        self._roll_search_best_delta = None
-        self._roll_search_best_quat = None
-        self._roll_search_best_roll_rad = None
-        self._roll_search_best_j5_rad = None
+        self._roll_search_best = None
+        self._roll_search_best_singular = None
         self._try_next_roll_candidate()
 
     def _get_current_arm_joint_positions(self):
@@ -1253,68 +1559,104 @@ class CoordToGoalNode(Node):
         넉넉한 시간/재시도)이 최종 판단임.
         """
         if self._roll_search_index >= len(ROLL_CANDIDATES_RAD):
-            if self._roll_search_best_quat is not None:
-                # [2026-07-29, 손목 특이점 회피] roll 후보 전수 조사로 고른
-                # 최적해가 여전히 J5 특이점 근처면, roll을 아무리 바꿔봐야
-                # 소용없으므로(위 WRIST_SINGULARITY_MARGIN_RAD 설명 참고)
-                # forward 벡터 자체를 기울여 재탐색. 남은 틸트 후보가 있을
-                # 때만 재시도 — 다 써버리면(FORWARD_TILT_CANDIDATES_RAD 소진)
-                # 특이점 근처라도 그냥 진행(그리퍼는 못 뻗는 것보단 도는 게
-                # 나음).
-                near_singularity = (
-                    self._roll_search_best_j5_rad is not None
-                    and abs(self._roll_search_best_j5_rad) < WRIST_SINGULARITY_MARGIN_RAD
-                )
-                if near_singularity and (
-                    self._roll_search_tilt_index + 1 < len(FORWARD_TILT_CANDIDATES_RAD)
-                ):
-                    self._roll_search_tilt_index += 1
-                    tilt_rad = FORWARD_TILT_CANDIDATES_RAD[self._roll_search_tilt_index]
-                    self.get_logger().warn(
-                        f'roll 후보 최적해가 J5 특이점 근처'
-                        f'({math.degrees(self._roll_search_best_j5_rad):.1f}도) — '
-                        f'forward 벡터를 {math.degrees(tilt_rad):.0f}도 기울여 재탐색'
-                    )
-                    self._roll_search_forward = _tilt_forward_vector(
-                        self._roll_search_base_forward, tilt_rad
-                    )
-                    self._roll_search_index = 0
-                    self._roll_search_retry = 0
-                    self._roll_search_best_delta = None
-                    self._roll_search_best_quat = None
-                    self._roll_search_best_roll_rad = None
-                    self._roll_search_best_j5_rad = None
-                    self._try_next_roll_candidate()
-                    return
+            # 이 고도각의 roll 전수 조사가 끝남 — 다음 고도각으로 넘어감.
+            #
+            # [2026-07-30, 전역 탐색] "첫 번째로 IK가 풀리는 고도각에서 멈춘다"로
+            # 먼저 구현했다가 되돌림. 그 방식은 고도각 선택이 관절 이동량 비교를
+            # 앞질러버려서, 편안한 어깨거리를 가졌지만 J1이 150도쯤 돌아가는
+            # 해(팔을 뒤로 감아 도달하는 IK 분기)를 그대로 채택하는 사례가
+            # 오프라인 시뮬레이션에서 나왔음 — 스윙이 161도로 개선 전보다 오히려
+            # 나빠짐. 그래서 고도각 × roll 전체를 훑고 그 안에서 관절 이동량
+            # 최소를 고르도록 바꿈. 같은 시뮬레이션에서 J1 스윙이 25~31도,
+            # 관절 이동량 합이 243~425도로 떨어짐(기존 로그: 스윙 46~62도,
+            # 이동량 345~692도).
+            #
+            # [2026-07-30, 3차] 다시 티어 단위로 되돌림 — 단, (1)과 결정적으로
+            # 다른 점은 **목적함수가 바뀌었다**는 것. "관절 이동량 최소"는 동작의
+            # 모양을 평가하지 않아 z>=0.27에서 아래에서 퍼올리는 우회 동작을
+            # 골랐음(사용자 관측). 지금은 "수직 우회량 최소(=완만한 고도각),
+            # 동률이면 관절 이동량 최소"이므로, 완만한 티어에서 멈추는 것이 곧
+            # 목적함수를 따르는 것임. (1)의 함정(성급한 채택)은 티어 안에 후보가
+            # 24개(부호 ± × roll 12)라 비교 대상이 충분해 완화됨 — 그래도 로그의
+            # J1 값으로 재확인할 것.
+            finished = self._approach_candidates[self._approach_candidate_index]
+            self._approach_candidate_index += 1
+            self._roll_search_index = 0
+            self._roll_search_retry = 0
 
-                if near_singularity:
-                    self.get_logger().warn(
-                        f'forward 기울임(틸트 후보 전부 소진)에도 J5가 여전히 '
-                        f'특이점 근처({math.degrees(self._roll_search_best_j5_rad):.1f}도)'
-                        ' — 그대로 진행'
-                    )
-
-                self.get_logger().info(
-                    f'roll 후보 전수 조사 완료 — 전체 관절 이동량 최소(roll '
-                    f'{math.degrees(self._roll_search_best_roll_rad):.0f}도, '
-                    f'예상 이동량 합 {math.degrees(self._roll_search_best_delta):.0f}도) '
-                    '후보 채택'
-                )
-                self._finalize_planning(self._roll_search_best_quat)
+            # [2026-07-30, 3차] 같은 |고도각| 티어(부호 ±가 한 쌍)를 다 훑기
+            # 전에는 채택하지 않고, 티어 경계에서 해가 있으면 그 자리에서
+            # 채택함. 전역 훑기(모든 고도각을 다 보고 관절 이동량 최소를
+            # 고르는 방식)에서 이렇게 바꾼 이유는 위 정렬 기준 주석 참고 —
+            # 목적함수가 "관절 이동량 최소"에서 "수직 우회량 최소(=완만한
+            # 고도각), 동률이면 관절 이동량 최소"로 바뀌었기 때문.
+            #
+            # 티어 = 이상 고도각에서 APPROACH_ELEVATION_TIER_RAD(10도) 안쪽인
+            # 후보 묶음. 5도 간격이라 티어당 후보 3~4개 × roll 12개 = 36~48개가
+            # 함께 평가되므로, 예전에 고도각 하나만 보고 성급히 채택했을 때
+            # 걸렸던 함정(J1이 150도 도는 IK 분기를 그대로 집는 문제)을 피할
+            # 만큼 비교 대상이 확보됨 — 그래도 로그의 J1 값으로 확인할 것.
+            next_candidate = (
+                self._approach_candidates[self._approach_candidate_index]
+                if self._approach_candidate_index < len(self._approach_candidates)
+                else None
+            )
+            same_tier_remains = next_candidate is not None and (
+                int(finished['elevation_error_rad'] / APPROACH_ELEVATION_TIER_RAD)
+                == int(next_candidate['elevation_error_rad'] / APPROACH_ELEVATION_TIER_RAD)
+            )
+            has_solution = (
+                self._roll_search_best is not None
+                or self._roll_search_best_singular is not None
+            )
+            if same_tier_remains or (not has_solution and next_candidate is not None):
+                self._try_next_roll_candidate()
                 return
 
-            fallback_quat = _compute_look_at_quat_xyzw(
-                self._roll_search_forward, roll_rad=ROLL_CANDIDATES_RAD[0]
+            # 전체 후보 소진 — 채택 단계.
+            # J5 특이점을 피한 해가 있으면 그쪽을 우선하고, 없으면 특이점
+            # 근처라도 씀(그리퍼는 못 뻗는 것보단 도는 게 나음).
+            best = self._roll_search_best or self._roll_search_best_singular
+            if best is not None:
+                if self._roll_search_best is None:
+                    self.get_logger().warn(
+                        '모든 후보의 최적해가 J5 특이점 근처'
+                        f'({math.degrees(best["j5_rad"]):.1f}도) — 그대로 진행'
+                    )
+                self.get_logger().info(
+                    f'접근축 탐색 완료 — 고도각 '
+                    f'{math.degrees(best["candidate"]["elevation_rad"]):+.0f}도 / roll '
+                    f'{math.degrees(best["roll_rad"]):.0f}도 채택 '
+                    f'(수직 우회 {best["candidate"]["vertical_detour_m"] * 1000:.0f}mm, '
+                    f'예상 관절 이동량 합 {math.degrees(best["delta"]):.0f}도, '
+                    f'정렬 반지름 {best["candidate"]["align_radius"]:.3f}m, '
+                    f'어깨거리 {best["candidate"]["align_shoulder_distance"]:.3f}m)'
+                )
+                self._finalize_planning(best['quat'], best['candidate'])
+                return
+
+            # 모든 고도각 × roll 조합에서 사전 IK가 안 풀린 경우. compute_ik는
+            # 사전 필터일 뿐이고 실제 OMPL 플래닝(더 넉넉한 시간/재시도)이 최종
+            # 판단이므로, 첫 후보(어깨거리가 가장 편안한 고도각 + roll 0도)로
+            # 강행함.
+            first = self._approach_candidates[0]
+            self.get_logger().warn(
+                '모든 접근 고도각 × roll 조합에서 사전 IK 실패 — 첫 후보'
+                f'(고도각 {math.degrees(first["elevation_rad"]):+.0f}도, roll 0도)로 강행'
             )
-            self._finalize_planning(fallback_quat)
+            fallback_quat = _compute_look_at_quat_xyzw(
+                first['forward'], roll_rad=ROLL_CANDIDATES_RAD[0]
+            )
+            self._finalize_planning(fallback_quat, first)
             return
 
+        candidate = self._approach_candidates[self._approach_candidate_index]
         roll_rad = ROLL_CANDIDATES_RAD[self._roll_search_index]
-        quat = _compute_look_at_quat_xyzw(self._roll_search_forward, roll_rad=roll_rad)
+        quat = _compute_look_at_quat_xyzw(candidate['forward'], roll_rad=roll_rad)
 
-        # [2026-07-27 정정] 정렬 위치(APPROACH_OFFSET_X만큼 로봇 쪽으로 당긴,
-        # 즉 더 가까운 지점)가 아니라 실제 목표 지점(_pending_target_position,
-        # 더 멀리 뻗어야 하는 쪽)으로 사전 IK를 검증함 — 그리퍼 actuation
+        # [2026-07-27 정정] 정렬 위치(APPROACH_STANDOFF_M만큼 로봇 쪽으로 당긴,
+        # 즉 더 가까운 지점)가 아니라 실제 flange 목표(후보의 'flange',
+        # 더 멀리 뻗어야 하는 쪽)로 사전 IK를 검증함 — 그리퍼 actuation
         # 1단계에서 "직진 접근"(목표 지점 그 자체로 이동) 단계를 추가해보니,
         # 정렬 위치에서는 풀리는 orientation이 그보다 8cm 더 먼 목표 지점에서는
         # "Unable to sample any valid states for goal tree"로 실패하는 경우를
@@ -1332,7 +1674,7 @@ class CoordToGoalNode(Node):
 
         pose_stamped = PoseStamped()
         pose_stamped.header.frame_id = BASE_LINK_NAME
-        position = self._pending_target_position
+        position = candidate['flange']
         pose_stamped.pose.position.x = position[0]
         pose_stamped.pose.position.y = position[1]
         pose_stamped.pose.position.z = position[2]
@@ -1370,15 +1712,18 @@ class CoordToGoalNode(Node):
             self.get_logger().warn(f'compute_ik 호출 실패, 재시도: {exc}')
             response = None
 
+        candidate = self._approach_candidates[self._approach_candidate_index]
+        elevation_deg = math.degrees(candidate['elevation_rad'])
+
         if response is not None and response.error_code.val == MoveItErrorCodes.SUCCESS:
             if self._roll_search_current_joint_positions is None:
                 # 현재 관절 자세를 모르면 비교 기준이 없으므로 기존 동작대로
                 # 첫 feasible 후보를 즉시 채택.
                 self.get_logger().info(
-                    f'roll 후보 {math.degrees(roll_rad):.0f}도에서 IK 확인됨, '
-                    '이 orientation 채택(현재 관절 자세 미수신, 이동량 비교 생략)'
+                    f'고도각 {elevation_deg:.0f}도 / roll {math.degrees(roll_rad):.0f}도에서 '
+                    'IK 확인됨, 이 접근축 채택(현재 관절 자세 미수신, 이동량 비교 생략)'
                 )
-                self._finalize_planning(quat)
+                self._finalize_planning(quat, candidate)
                 return
 
             # [2026-07-28, 전체 관절 이동량 최소화] 손목 하나만 보면 다른
@@ -1405,17 +1750,33 @@ class CoordToGoalNode(Node):
 
             if delta is not None:
                 self.get_logger().info(
-                    f'roll 후보 {math.degrees(roll_rad):.0f}도에서 IK 확인됨 '
-                    f'(예상 전체 관절 이동량 합 {math.degrees(delta):.0f}도)'
+                    f'고도각 {elevation_deg:+.0f}도 / roll {math.degrees(roll_rad):.0f}도에서 '
+                    f'IK 확인됨 (예상 전체 관절 이동량 합 {math.degrees(delta):.0f}도)'
                 )
-                if self._roll_search_best_delta is None or delta < self._roll_search_best_delta:
-                    self._roll_search_best_delta = delta
-                    self._roll_search_best_quat = quat
-                    self._roll_search_best_roll_rad = roll_rad
-                    self._roll_search_best_j5_rad = j5_rad
-                # 즉시 채택하지 않고 다음 후보까지 계속 조사(전수 조사 후
-                # _try_next_roll_candidate의 exhaustion 분기에서 최소 회전량
-                # 후보를 최종 채택함).
+                # [2026-07-30] 최적해를 J5 특이점 여부에 따라 두 칸으로 나눠
+                # 기억함 — 특이점을 피한 해가 하나라도 있으면 그쪽을 쓰고,
+                # 전혀 없을 때만 특이점 근처 해로 폴백하기 위함(예전에는
+                # 최적해 하나만 들고 있다가 그게 특이점이면 forward를 다시
+                # 기울여 재탐색했는데, 이제 고도각이 이미 탐색 차원이라
+                # 재탐색 없이 한 번의 전역 훑기로 처리됨).
+                record = {
+                    'delta': delta,
+                    'quat': quat,
+                    'roll_rad': roll_rad,
+                    'j5_rad': j5_rad,
+                    'candidate': candidate,
+                }
+                is_singular = (
+                    j5_rad is not None
+                    and abs(j5_rad) < WRIST_SINGULARITY_MARGIN_RAD
+                )
+                slot = '_roll_search_best_singular' if is_singular else '_roll_search_best'
+                current = getattr(self, slot)
+                if current is None or delta < current['delta']:
+                    setattr(self, slot, record)
+                # 즉시 채택하지 않고 다음 후보까지 계속 조사(고도각 × roll
+                # 전역 훑기가 끝난 뒤 _try_next_roll_candidate의 exhaustion
+                # 분기에서 최소 이동량 후보를 최종 채택함).
                 self._roll_search_retry = 0
                 self._roll_search_index += 1
                 self._try_next_roll_candidate()
@@ -1424,9 +1785,10 @@ class CoordToGoalNode(Node):
             # IK 응답에 손목 관절이 없는 예외적인 경우 — 회전량 비교 불가하니
             # 기존 동작대로 즉시 채택.
             self.get_logger().info(
-                f'roll 후보 {math.degrees(roll_rad):.0f}도에서 IK 확인됨, 이 orientation 채택'
+                f'고도각 {elevation_deg:.0f}도 / roll {math.degrees(roll_rad):.0f}도에서 '
+                'IK 확인됨, 이 접근축 채택'
             )
-            self._finalize_planning(quat)
+            self._finalize_planning(quat, candidate)
             return
 
         self._roll_search_retry += 1
@@ -1537,11 +1899,22 @@ class CoordToGoalNode(Node):
             RETURN_TO_LOOK_POSE_DELAY_SEC, self._start_return_to_look_pose
         )
 
-    def _finalize_planning(self, approach_quat) -> None:
+    def _finalize_planning(self, approach_quat, candidate) -> None:
+        # [2026-07-30] 채택된 접근축(candidate['forward']) 위에서 두 웨이포인트를
+        # 확정함 — 예전에는 _on_target_point에서 g_base X축 성분만 빼 미리
+        # 확정해두고 여기서는 orientation만 받았음(그래서 위치와 방향이 서로
+        # 다른 축을 가리켰음, _waypoints_along_forward 주석 참고).
         self._publish_grasp_step(GRASP_STEP_ALIGN)
         self._pending_quat = approach_quat
+        self._pending_target_position = candidate['flange']
+        self._pending_approach_position = candidate['align']
         approach_position = self._pending_approach_position
 
+        self.get_logger().info(
+            f'[1/5 정렬] 접근축 고도각 {math.degrees(candidate["elevation_rad"]):.0f}도, '
+            f'flange 목표 {[round(c, 3) for c in candidate["flange"]]} '
+            f'(정렬 반지름 {candidate["align_radius"]:.3f}m)'
+        )
         self.get_logger().info(
             f'[1/5 정렬] 목표 위치로 플래닝: {approach_position}, orientation(xyzw): '
             f'{[round(c, 3) for c in approach_quat]}'

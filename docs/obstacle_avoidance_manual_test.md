@@ -894,3 +894,443 @@ so101은 파지 후 "복귀"가 (반지름만 다른) 두 관절 상태 사이�
 waypoint 강제 등을 다음 과제로 남긴 상태) — **so101 쪽에서 검증된 해법이
 나오면 그때 참고할 것, 지금 mycobot에서 먼저 재설계할 필요는 없음**(그리퍼
 actuation이 아직 없어 실익이 낮음).
+
+## 2026-07-27 그리퍼 actuation 1단계 — 메커니즘 검증 완료, "직진 접근" reachability는 미해결 (다음 세션 최우선)
+
+**결론부터**: Tier5에서 "향후 과제"로만 남겨뒀던 실제 그리퍼 파지(actuation)
+구현을 시작함. `coord_to_goal_node`를 정렬→**그리퍼 열기**→직진 접근→
+**파지(닫기)**→후퇴 5단계로 재구성(so101 교훈 그대로 "그리퍼 열기"를
+명시적 단계로 추가). 인프라(SRDF/컨트롤러/자기충돌)를 여러 번 고친 끝에
+**정렬(1/5)·그리퍼 열기(2/5)는 mock 스택에서 안정적으로 성공** 확인함.
+**직진 접근(3/5)은 아직 미해결** — 다음 세션 최우선 조사 대상.
+
+### 그리퍼 인프라 구축 (전부 실물 파지 최초 시도라 처음 겪는 문제들)
+
+SRDF에 `gripper`/`gripper_open`/`gripper_closed` 그룹만 추가하면 될 줄
+알았는데, 그리퍼 조인트를 MoveIt으로 실제로 움직여본 게 이번이 처음이라
+연쇄적으로 인프라 공백이 드러남:
+
+1. **`gripper_group_controller` 자체가 없었음** — `ros2_controllers.yaml`/
+   `moveit_controllers.yaml`에 `arm_group_controller`만 있고 그리퍼용
+   컨트롤러가 아예 없어서, MoveIt이 "gripper" 그룹 궤적을 실행할 방법이
+   없었음. 둘 다 추가(URDF `firefighter.ros2_control.xacro`엔 이미
+   `gripper_controller` 조인트의 command/state interface가 있었음 — 이것만
+   빠져있었음).
+2. **`GRIPPER_OPEN_POSITION`을 URDF 조인트 상한(0.15rad) 그대로 쓰면
+   실패** — 정확히 한계값이면 OMPL이 목표 상태를 샘플링할 여유가 없어서
+   `Insufficient states in sampleable goal region`으로 매번 실패함. 양 끝에서
+   여유를 두고 `0.12`/`-0.6`으로 조정.
+3. **`gripper_controller`에 속도/가속 한계가 없었음** — URDF엔
+   `velocity="0"`(팔 6관절과 같은 패턴, `joint_limits.yaml`로 채워야 함)인데
+   그리퍼는 안 채워져 있어서 `AddTimeOptimalParameterization`이 "No velocity
+   limit was defined" 에러로 궤적 생성 자체를 실패함 — `joint_limits.yaml`에
+   `gripper_controller`(max_velocity=1.0, max_acceleration=2.0) 추가.
+4. **좌우 손가락 교차 자기충돌 미등록** — 그리퍼를 열어보니
+   `gripper_left3`<->`gripper_right3`가 충돌로 잡힘. 기존 SRDF
+   self-collision 패치(`gripper_left1~3`/`gripper_right1~3`)는 "같은 쪽"
+   링크끼리만 다뤄서 좌우 교차 9쌍이 통째로 빠져있었음 — 전부 추가.
+
+### ⚠️ 그리퍼 마운트 180도 방향 오류 발견 + 수정 (사용자 육안 확인)
+
+사용자가 "실물 그리퍼는 체결용 구멍 여러 개 있는 면이 상단인데 RViz는
+하단"이라고 지적 — `mycobot_280_m5_adaptive_gripper.urdf`의
+`joint6output_to_gripper_base`(flange->gripper_base 고정 조인트) origin을
+보니 `rpy="1.579 0 0"`(≈+90.5도)로 돼 있었고, 바로 위에 주석 처리된
+이전 값이 `rpy="-1.5708 0 0"`(≈-90도) — 정확히 180도 반대. Roll 부호만
+뒤집어(`-1.579`, z 오프셋 0.034는 유지) 수정 → **RViz/실물 방향 일치
+확인함(사용자 확인)**. 이 수정이 부수적으로 `joint5`(손목)<->
+`gripper_left1` 자기충돌을 새로 드러냈는데(방향이 뒤집혀 있을 때는 우연히
+안 겹쳤던 것), **RViz look pose->목표 애니메이션과 실물 둘 다 실제 간섭
+없음을 사용자가 확인**해줘서 콜리전 메시 여유분으로 판단, `joint5`도
+그리퍼 7개 링크 전부와 충돌 허용으로 SRDF 패치함.
+
+**중요**: 이 마운트 방향 버그는 그리퍼가 실제로 물체를 잡는 자세/각도에
+영향을 줄 수 있는 실제 버그였음 — 다음 세션에 그리퍼 실물 파지 테스트할
+때 이 수정이 반영된 상태인지(재빌드 여부) 반드시 확인할 것.
+
+### ⚠️ 미해결: "직진 접근"(3/5) reachability — 다음 세션 최우선
+
+정렬(오프셋 위치, APPROACH_OFFSET_X=0.08m 만큼 로봇 쪽으로 당긴 지점)에서
+같은 orientation으로 목표 지점 **그 자체**까지 8cm 더 들어가는 마지막
+이동이 계속 실패함. 여러 좌표(0.219,0.054,0.311 / 0.30,0,0.25)에서
+재현됨 — 특정 좌표만의 문제가 아니라 구조적 문제로 보임.
+
+**시도했으나 효과 없었던 것들**:
+1. roll 후보 IK 사전검증 대상을 정렬 위치 대신 목표 지점(더 먼 쪽)으로
+   변경 — 그래도 실패.
+2. `target_object` 충돌 허용 ACM에 `joint6_flange` 추가(그리퍼 링크만
+   있었음) — 콜리전 로그 자체가 안 찍혀서 애초에 원인이 아니었음.
+3. 위치 tolerance 완화(0.005m -> 0.02m) — 효과 없음.
+4. **Cartesian 경로 계획으로 전환**(`compute_cartesian_path`,
+   `plan_async()`+`get_trajectory()`+`execute()`를 직접 조합해 구현 —
+   `move_to_pose(cartesian=True)`를 그냥 쓰면 `use_move_group_action`
+   설정과 무관하게 내부적으로 blocking `plan()`을 타서 이 노드의
+   MultiThreadedExecutor와 충돌함, 그래서 non-blocking 조합으로 직접
+   구현함). **결과가 오히려 더 뚜렷한 단서를 줌**: 8cm 이동 중 겨우
+   **2.9%(≈2.3mm)만 진행하고 바로 막힘** — 목표 근처의 문제가 아니라
+   **정렬 위치의 IK 해 자체가 관절 한계/특이점에 거의 붙어있어서, 그
+   자리에서 어느 방향으로든 조금만 움직여도 막히는 자세**라는 뜻으로
+   해석됨.
+
+**유력 가설(확정 아님, 다음 세션 조사 대상)**: 정렬 단계가 "목표까지 이어
+지는 경로 전체"를 고려하지 않고 정렬 위치+orientation만 독립적으로 풀림
+(OMPL RRTConnect가 아무 유효해나 하나 고름, orientation tolerance도
+0.5rad로 넉넉해서 후보가 넓음) — 그 결과 관절 여유(manipulability)가
+안 좋은 해를 우연히 고르면 그 다음 이동(직진 접근)이 막힘. look pose
+자체가 나쁜 자세라는 근거는 없음(look pose는 정렬 단계의 시작점/forward
+벡터 계산 기준일 뿐, 정렬 단계 결과 관절해 자체는 OMPL이 사실상
+임의로 고름).
+
+### 다음 세션 우선순위
+
+1. **"직진 접근" reachability 문제 해결** (최우선) — 후보 방향:
+   - 정렬과 직진 접근을 하나의 플래닝 문제로 묶기(예: 목표 지점을 먼저
+     풀고 거기서 거꾸로 정렬 위치까지의 경로가 유효한지 확인, 또는 둘 다
+     만족하는 궤적을 한 번에 요청).
+   - roll 후보 검증 시 "목표 지점의 IK가 풀리는지"뿐 아니라 "정렬 위치에서
+     목표 지점까지 Cartesian 경로가 실제로 이어지는지"까지 사전 확인.
+   - orientation tolerance를 더 좁혀서 OMPL이 매번 비슷한(안정적인) 해를
+     고르도록 유도해보는 것도 시도해볼 가치 있음.
+2. 1번이 해결되면 실제 파지(그리퍼 닫기) + 후퇴까지 mock 전체 파이프라인
+   end-to-end 검증.
+3. 그 다음 실물로 그리퍼 마운트 방향 수정 반영 확인 + 실제 파지 시도.
+4. 오늘 추가한 인프라(gripper_group_controller, joint_limits, 자기충돌
+   패치)는 이미 mock에서 검증됨 — 실물에서 다시 볼 필요 없음, 코드/설정
+   문제 없었음.
+
+## 2026-07-27 "직진 접근" reachability 진짜 원인 발견 + 수정 (세 번째 세션)
+
+**결론부터**: 위 "미해결: 직진 접근 reachability" 절의 유력 가설(정렬 단계가
+OMPL로 임의의 관절해를 골라서 그 해가 나쁘면 다음 이동이 막힌다)은 **틀렸음이
+이번 세션에 실측으로 확인됨**. 진짜 원인은 훨씬 단순했음: **`target_object`
+충돌 허용 ACM에 `joint5`/`joint6` 링크가 빠져있었던 것**. `/check_state_validity`로
+목표 지점 IK 해를 직접 검사해서 발견함. 이 두 링크를 ACM에 추가하는 것만으로
+문서에 기록된 두 실패 좌표(g_base [0.219,0.054,0.311], [0.158,0.198,0.152])가
+mock 스택에서 매번(또는 최대 1~2회 재시도 내) 5/5 단계 전부 성공으로
+전환됨(아래 "검증 결과" 참고). 추가로 안전망 2개(직진 접근 dry-run 재시도,
+후퇴 OMPL 폴백)를 넣어 나머지 소수 실패 케이스도 위험하게 방치되지 않도록 함.
+
+### 시도했다가 되돌린 접근: 정렬+직진 접근 IK 시드 결합
+
+유력 가설을 검증하려고 먼저 "목표 지점 IK 해를 시드로 정렬 위치 IK도 같이
+확인하고, 성공하면 그 특정 관절해로 정렬을 joint-space 이동시키는" 방식을
+구현했음(`compute_ik`의 `robot_state.joint_state`를 시드로 사용). 그런데
+`/tmp` 스크래치패드 스크립트로 직접 검증해보니, **`avoid_collisions=True` +
+정확한 orientation(tolerance 없음) 조합 자체의 IK 성공률이 이 그리퍼 자세에서는
+타임아웃을 1초로 늘려도 사실상 0에 가까움**(목표 지점 단독 IK조차 10회 중
+0회, `avoid_collisions=False`로는 40~50% 수준) — 즉 기존 roll 후보 사전
+필터(`ROLL_CANDIDATE_IK_TIMEOUT_SEC=0.05`) 자체가 "가끔 맞으면 좋고 아니면
+말고" 수준이었지 신뢰 가능한 사전 검증 수단이 아니었음. 여기에 시드 조건까지
+얹으면 이미 낮은 성공률이 더 낮아져 거의 항상 exhaustion(12개 roll 후보 x 3
+재시도 전부 실패)으로 빠져 사실상 무의미한 지연만 추가함이 확인돼 되돌림
+(코드는 원래의 단순한 roll 후보 사전 필터로 복원, `_on_roll_candidate_result`
+주석 참고).
+
+### 진짜 원인 발견: `/check_state_validity`로 목표 지점 IK 해 직접 검사
+
+시드 접근을 되돌린 뒤, "OMPL이 목표 지점에서 왜 매번 `Unable to sample any
+valid states for goal tree`로 실패하는지"를 `avoid_collisions=False`로 구한
+목표 지점 IK 해에 `/check_state_validity`를 직접 돌려서 확인함. 결과:
+
+```
+collision: joint5 <-> target_object  depth=-0.0033
+collision: joint6 <-> target_object  depth=-0.0007
+```
+
+**모든 IK 해에서 예외 없이 이 두 충돌이 재현됨**. 기존 ACM 패치(2026-07-23,
+2026-07-27 오전)는 `GRIPPER_LINK_NAMES`(그리퍼 7개 링크) + `END_EFFECTOR_NAME`
+(`joint6_flange`)만 `target_object`와 충돌 허용했는데, **flange 바로 위
+링크인 `joint5`/`joint6`는 빠져있었음** — 정렬 위치(목표에서
+`APPROACH_OFFSET_X`=8cm 뒤로 뺀 곳)에서는 이 링크들이 `TARGET_OBJECT_RADIUS`
+=5cm 클리어런스 구 밖에 있어서 안 겹쳤지만, 목표 지점 그 자체(그리퍼가
+실제로 파고드는 자리)에서는 flange뿐 아니라 그 위 두 링크까지 구 안으로
+들어와서 매번 충돌 판정됐던 것. `avoid_collisions=True`(OMPL이 실제로 쓰는
+설정)로는 이 충돌 때문에 목표 지점 근방에 collision-free 상태가 아예
+없었으니, "정렬 단계가 나쁜 관절해를 골라서"가 아니라 **애초에 목표
+지점이라는 위치 자체가 항상 self-collision 판정이었던 것** — 정렬 단계가
+무엇을 고르든 상관없이 실패할 수밖에 없는 구조였음.
+
+**수정**: `WRIST_LINK_NAMES = ['joint5', 'joint6']` 상수 추가, ACM 허용
+목록을 `GRIPPER_LINK_NAMES + WRIST_LINK_NAMES + [END_EFFECTOR_NAME]`(10개)로
+확장.
+
+### 안전망 1: "직진 접근" 실행 전 dry-run 재시도 (`_verify_grasp_approach_reachable`)
+
+ACM 수정만으로 대부분 해결됐지만, 워크스페이스 경계에 가까운 좌표(예:
+g_base (0.30,0,0.25), 반지름 0.39m — `MAX_TARGET_RADIUS_M`=0.45에 근접)는
+ACM 수정 후에도 여전히 Cartesian 직진 접근이 26~58% 정도에서 막히는 경우가
+남아있음이 확인됨(`/compute_cartesian_path`를 직접 호출해 마지막 유효
+waypoint의 관절값을 URDF 한계와 대조해봤더니 어느 관절도 한계 근처가
+아니었고, 대신 연속 waypoint 간 관절 이동량이 끝에 갈수록 0에 수렴하는
+패턴 — 특이점 근처에서 수치해석 IK 추적이 멈추는 전형적인 신호로 보임,
+관절 한계 문제가 아니라 Cartesian 직선 추적 자체의 한계로 추정).
+
+이런 경우를 실행 전에 미리 걸러내기 위해, 정렬(1/5) 완료 직후 **실행하지
+않고** 직진 접근 Cartesian 경로가 `CARTESIAN_FRACTION_THRESHOLD`(0.95) 이상
+풀리는지 dry-run(`plan_async`만 호출, `execute()` 생략)으로 먼저 확인함.
+안 풀리면 정렬을 다시 풀어서(OMPL RRTConnect는 확률적이라 재시도마다 다른
+관절해를 고름) 이어지는 해가 나올 때까지 반복(`MAX_ALIGN_RETRIES=5`).
+5회를 다 써도 못 찾으면 그 자리에서 안전하게 abort(look pose 복귀) —
+실제 실행 중간에 멈추는 것보다 미리 걸러내는 편이 안전함.
+
+### 안전망 2: 후퇴(5/5) Cartesian 실패 시 OMPL 폴백 (`_start_retreat_ompl_fallback`)
+
+후퇴 단계도 같은 종류의 Cartesian 직선 추적 실패가 가끔 재현됨(mock
+실측, 46.9% 완료 사례 확인). 접근(3/5)은 실패해도 빈 그리퍼로 그 자리에서
+포기(abort)하면 되지만, **후퇴(5/5)는 이미 물체를 쥔 상태**라 그냥
+포기하는 것보다 OMPL 자유 경로로라도 정렬 위치까지는 물러나는 게 안전함
+(정확한 직선보다 안전한 탈출 우선). Cartesian이 실패하면 OMPL
+`move_to_pose`로 폴백하도록 추가.
+
+### 검증 결과 (mock 스택, `demo.launch.py use_rviz:=false`, 카메라 없이
+IK/OMPL/Cartesian 로직만 격리 검증 — Octomap 없이도 재현 가능한 문제라 D435
+불필요)
+
+- **g_base [0.158, 0.198, 0.152]** (과거 identity만 성공하던 좌표): 3회 연속
+  테스트, 매번 5/5 전부 성공(0회 또는 1회 정렬 재시도 내). ACM 수정 전에는
+  roll 후보 IK 사전 필터 자체가 매번 exhaustion으로 실패했었음(target IK가
+  `avoid_collisions=True`로 전혀 안 풀렸으므로) — 수정 후 "roll 후보 0도에서
+  IK 확인됨"으로 즉시 성공.
+- **g_base [0.219, 0.054, 0.311]** (문서에 최초로 `Unable to sample any valid
+  states for goal tree`가 기록된 좌표): 2회 테스트, 매번 5/5 전부 성공(0회
+  또는 1회 정렬 재시도 내).
+- **g_base [0.30, 0, 0.25]** (반지름 0.39m, 워크스페이스 경계 근접): ACM
+  수정 후에도 5회 정렬 재시도를 전부 소진하며 실패, 안전하게 abort + look
+  pose 복귀함(실행 중 충돌/정지가 아니라 사전에 걸러진 것). 진짜 워크스페이스
+  경계 문제로 보이며, 이 좌표 자체가 실제 수확 시나리오에서 나올 가능성이
+  낮다면 우선순위 낮음.
+
+### 다음 세션에 할 일
+
+1. **실물 검증** (최우선, 아직 전혀 안 함): 이번 세션은 전부 mock 스택
+   (FakeSystem, 카메라 없이 `demo.launch.py`)로만 검증함. 실물 파지는 아직
+   한 번도 시도 안 됨 — `docs/obstacle_avoidance_manual_test.md` 사전 조건대로
+   look pose 동기화 후, 그리퍼 마운트 방향 수정(2026-07-27 오전 세션)이
+   반영된 상태인지 재확인하고 실제 D435 + `pick_pipeline.launch.py`로 진행.
+2. **워크스페이스 경계 근접 좌표(예: (0.30,0,0.25) 부류)를 어떻게 다룰지
+   결정**: 재시도로도 못 푸는 게 정상(진짜 도달 불가 근처)이라면 현재의
+   "안전하게 abort" 동작으로 충분한지, 아니면 `MAX_TARGET_RADIUS_M`을
+   실제 도달 가능 범위에 맞춰 더 보수적으로 줄일지 판단 필요(harvest
+   시나리오에서 이런 먼 좌표가 실제로 나오는지 실물 데이터로 확인 후 결정).
+3. `MAX_ALIGN_RETRIES=5`, `ROLL_CANDIDATE_IK_TIMEOUT_SEC`/`RETRIES` 등 이번
+   세션에 손대지 않은 관련 상수들은 실물 검증하면서 필요시 튜닝.
+
+## 2026-07-27 실물 첫 파지 성공 + 그리퍼 실물 릴레이 발견 (네 번째 세션)
+
+**결론부터**: 이번 세션에 **실물 파지가 처음으로 완전히 성공**했음(정렬→그리퍼
+열기→직진 접근→파지→후퇴→look pose 복귀 5단계 전부, 실물 sync_plan 경유).
+가는 길에 큰 버그를 여럿 발견/수정함 — 가장 중요한 건 **`sync_plan.py`가
+그리퍼를 아예 몰랐다**는 것(아래 참고). 그 외 카메라 하드웨어 불안정,
+depth hole로 인한 검출 누락, YOLO CPU 상시 과부하, 3D 프린트 소품 색상
+오분류까지 전부 이번 세션에 확인/수정함. 남은 핵심 이슈는 **파지 정확도**
+(줄기를 잡은 사례 1회 확인) — 다음 세션 최우선.
+
+### 핵심 수정 1: `sync_plan.py`가 그리퍼 명령을 실물로 전혀 안 보내고 있었음
+
+RPi(`jetcobot_126b`, `~/smh_ws/src/mycobot_ros2_humble/mycobot_280/
+mycobot_280_moveit2_control/mycobot_280_moveit2_control/sync_plan.py`)의
+`/joint_states` -> `send_angles()` 릴레이 로직이 **팔 6축만 relay**하고
+`gripper_controller` 조인트는 애초에 목록(`rviz_order`)에 없어서 완전히
+무시되고 있었음 — 이번 세션에 처음 그리퍼 actuation을 실물로 시도해보고서야
+드러남(그전엔 그리퍼 자체를 실물로 시도한 적이 없어서 몰랐던 것). MoveIt/
+FakeSystem 쪽은 "성공"으로 보고하는데 실물 그리퍼는 절대 안 움직이는 상태.
+
+**수정**: `sync_plan.py`에 `gripper_controller` 값 변화를 감지해
+`mc.set_gripper_state(flag, speed, gripper_type=1)`(0=open,1=close, 어댑티브
+그리퍼)로 relay하는 로직 추가(중간값이 아니라 open/close 목표값과의 거리로
+판정, `/joint_states`가 자주 들어와도 상태 변화 시에만 전송). 이 파일은
+**이 워크스페이스 밖(RPi의 별도 `smh_ws`)에 있어서 git으로 안 잡힘** —
+재현하려면 이 문서 내용을 참고해서 다시 적용할 것. RPi에서 재시작할 때
+**`ROS_DOMAIN_ID=21`을 명시적으로 export해야 함**(비대화형 SSH 세션은
+`.bashrc`의 `export ROS_DOMAIN_ID=21`을 안 읽어서 다른 도메인으로 떠버려
+그래프에 아예 안 잡히는 사고가 있었음 — 반드시 `export ROS_DOMAIN_ID=21`을
+같은 명령에 포함해서 실행할 것).
+
+### 핵심 수정 2: YOLO depth hole — 컬러는 검출되는데 좌표 계산이 조용히 스킵됨
+
+`_accumulate_detections`가 bbox **중심 픽셀 딱 한 점**의 depth만 보는데,
+그 지점이 정확히 무효(depth=0, D435의 반사/각도 depth hole)인 경우가 실물에서
+재현됨 — 컬러 검출은 0.84 신뢰도로 성공하는데 `raw_depth <= 0.0`이라 매번
+조용히 버려짐(에러도 안 남음). 카메라 프레임을 직접 캡처해서 같은 모델로
+재현 + 5x5 주변 depth 전부 0임을 실측 확인. **수정**: bbox 영역 전체에서
+0이 아닌 depth 값의 **중앙값**을 쓰도록 변경(`_robust_bbox_depth_m` 신규
+함수). 이 변경 후 검출 0개 -> 13개로 즉시 회복됨.
+
+### 핵심 수정 3: 3D 프린트 소품 색상 오분류 (pick8.py에서 포팅)
+
+같은 모델(v6)을 쓰는 다른 파이프라인(`pick8.py`, 자체 FK/IK 기반, 이
+워크스페이스 안에 있지만 `mycobot_280_pick`과는 독립된 스크립트)에서 이미
+겪고 해결한 문제: v6 모델이 **3D 프린트 소품 특유의 단색**(실제 토마토처럼
+중간색이 없음) 때문에 초록 소품→ripe, 노랑 소품→unripe 등으로 자주
+오분류함. `pick8.py`의 `classify_by_color`/`COLOR_OVERRIDE`를
+`yolo_d435_detector_node.py`에 포팅 — bbox 안 지배적 HSV 색상(빨강=ripe/
+초록=unripe/노랑=disease)으로 YOLO 클래스를 덮어씀. **포팅 중 발견한 버그**:
+`result.boxes.data`가 PyTorch inference-mode 텐서라 그냥 덮어쓰면
+`RuntimeError`(직접 재현 확인) — `result.boxes.data = result.boxes.data.clone()`
+먼저 호출해야 함. `detect_green_blobs`(v6가 초록 소품을 아예 못 찾는 문제
+보완)는 **포팅 안 함**(unripe는 `HARVEST_CLASS_NAMES`에 없어 수확 대상이
+아니므로 우선순위 낮다고 판단, 사용자 확인).
+
+### 그 외 수정 (`coord_to_goal_node.py`, `yolo_d435_detector_node.py`)
+
+- **그리퍼 마운트 방향 재수정**: 오전 세션에 "180도 반대"로 착각해 뒤집었던
+  것(rpy roll 부호 반전)이 실제로는 잘못된 축이었음이 이번 세션에 밝혀짐 —
+  제조사 원본값(`elephantrobotics/mycobot_ros2` origin/humble,
+  `rpy="1.579 0 0"`)으로 되돌린 뒤, 사용자가 실물 TF를 직접 비교해서 확정한
+  **gripper_base 로컬 +Y축(전방) 기준 180도 롤**을 새로 합성해 적용
+  (`rpy="1.562593 0 3.141593"`, `mycobot_280_m5_adaptive_gripper.urdf`,
+  git으로 안 잡히는 vendor 경로). 계산 과정: 원본 회전(Rx(1.579))에
+  로컬 Y축 180도 회전을 post-multiply — 전방(Y)은 유지, 좌우(X)/상하(Z)만
+  반전.
+- **파지 후 안전 시퀀스 강화**: 파지(4/5) 완료 후 `POST_GRASP_DWELL_SEC=2.0`
+  초 대기(육안 확인용, 이전엔 없었음) 추가. 후퇴(5/5)+look pose 복귀 구간은
+  `RETREAT_VELOCITY_SCALING/ACCELERATION_SCALING=0.05`로 감속(그리퍼가
+  물체를 쥔 채 움직이는 유일한 구간이라 so101 교훈 그대로 적용, look pose
+  도착 후 원래 속도로 복원). 실물 첫 테스트라 전체 속도(`VELOCITY_SCALING/
+  ACCELERATION_SCALING`)도 0.3→0.1로 보수적으로 낮춤.
+- **YOLO 상시 추론 -> look pose 누적 구간에서만 추론으로 되돌림**: Tier2에서
+  "시각화는 항상 발행"으로 설계했던 것이, 실물 세션에서 CPU를 상시 크게
+  잡아먹어 시스템 부하가 쌓이고 카메라 스트림 자체가 불안정해지는 악순환의
+  주요 원인 중 하나로 확인됨(`ps aux` CPU% 실측, `yolo_d435_detector_node`
+  단독 80%+). look pose 누적 구간에서만 추론하도록 되돌림 — 트레이드오프로
+  평소엔 `tomato_boxes`/`tomato_detections_image`가 안 갱신됨(누적 중에만
+  보임). Octomap 파이프라인을 나중에 같이 켜는 세션에서는 이 게이팅 때문에
+  look pose를 벗어난 동안 토마토가 다시 Octomap 장애물로 잡힐 수 있음 —
+  그럴 땐 재검토 필요.
+- **YOLO depth 보정값 추가 조정**: `MAX_ESTIMATED_RADIUS_M` 3.5cm→2cm,
+  `DEPTH_SAFETY_MARGIN_M` 신규 추가(0.03→0.05cm으로 증가, 실물 피드백
+  기반 반복 조정). **주의**: depth hole 버그(핵심 수정 2) 수정 이후로
+  depth 측정 자체가 더 정확해졌으므로, 이 마진이 지금은 과보정돼 있을
+  가능성이 있음 — 다음 세션에 재검증 필요(주석으로 남겨둠).
+- **`gripper_isolated_test.py`류 스크래치패드 스크립트**: 전체 5단계 없이
+  그리퍼 열기/닫기만 단독 테스트하는 패턴을 여러 번 씀 — 재현하려면
+  `MoveIt2Gripper` 인스턴스 하나로 `open()`/`close()`만 호출하면 됨(코드는
+  세션 스크래치패드에만 있고 저장 안 함, 필요하면 다음 세션에 다시 작성).
+
+### 카메라(D435) 하드웨어 불안정 — 부분 완화, 근본 해결은 아님
+
+이번 세션 내내 반복적으로 스트림이 끊기거나(`Hardware Error`, `Depth stream
+start failure`) 서서히 프레임레이트가 떨어지는(30Hz→5Hz) 문제가 있었음.
+시도한 것들과 효과:
+- USB 전원 자동서스펜드(`power/control`) — udev 규칙이 있는데도 재부팅 후
+  `auto`로 돌아가는 경우가 있었음(원인 불명) — 수동으로 `on` 재설정 필요할
+  수 있음(sudo 필요, AI가 직접 못 함).
+- 케이블/포트 교체 — 한 번은 실수로 **USB 2.1 포트**로 연결돼 오히려
+  악화됨("Reduced performance is expected" 경고 직접 확인) — 반드시 USB
+  3.0/3.1(파란 포트/SS 마크) 확인할 것.
+- **재부팅**이 가장 효과적이었음(시스템 load average가 5점대까지 쌓여있던
+  것이 0.5대로 초기화됨) — 이 워크스테이션에서 다른 무거운 프로그램(다른
+  Claude Code 세션 등)이 다수 실행 중이면 카메라 스트림 안정성에 실측으로
+  영향을 준다는 정황 확인.
+- `pointcloud.enable:=false`로 realsense 노드 자체 pointcloud 생성을 끔
+  (이 파이프라인은 pointcloud를 안 쓰므로 불필요한 CPU 소비였음).
+- 그래도 완전히는 해결 안 됨 — 다음 세션 시작 시 카메라 스트림이 이미
+  불안정하면 위 항목들을 순서대로 재확인할 것. `ros2 topic hz
+  /camera/camera/color/image_raw`로 먼저 상태 체크 권장.
+
+### 실물 검증 결과 요약
+
+- **첫 완전 성공 사이클**: 정렬(1~2회 재시도) → 그리퍼 열기 → 직진 접근 →
+  파지 → 2초 대기 → 감속 후퇴 → look pose 복귀, 전부 실물에서 성공. 이후
+  같은 패턴으로 여러 차례 반복 성공(자동 순차 처리도 확인 — look pose
+  복귀 즉시 다음 타겟 재검출 후 자동 재시작).
+- **⚠️ 파지 정확도 이슈**: 한 사이클에서 그리퍼가 목표 토마토가 아니라
+  **나무 줄기를 잡은 사례 확인됨**(육안 확인). 그리퍼 열고 look pose로
+  복귀시켜 회수함. depth hole 수정 + DEPTH_SAFETY_MARGIN_M 조정이 이
+  사이클 이전/이후 어느 시점이었는지 명확치 않아, 이 정확도 문제가 지금도
+  남아있는지 다음 세션에 재검증 필요.
+- **정렬 재시도 중 화면이 계속 바뀌는 현상**: 버그 아님 — OMPL(RRTConnect)이
+  재시도마다 확률적으로 다른 관절해를 실제로 찾아 실행하기 때문(플래닝
+  미리보기가 아니라 매번 진짜 실행). 손목(J6)이 재시도 사이에 크게
+  달라지는 것도 같은 원인(같은 목표 orientation을 만족하는 IK 해가 여러
+  개라 그 중 다른 branch를 고르는 것으로 추정) — 실제 이상 동작은 아닌
+  것으로 판단됨.
+- **비상 정지 방법**: 사용자가 직접 관리하기로 함(AI가 임의로 sync_plan을
+  켜고 끄지 않음) — `ssh jetcobot_126b 'pkill -9 -f sync_plan'`이 가장
+  직접적(소프트 정지, 토크는 안 끊김 — 팔은 그 자리에서 힘이 걸린 채
+  멈춤). 워크스테이션 쪽 `/emergency_stop` 서비스는 그보다 상위(MoveIt
+  궤적 취소)라 sync_plan까지 이미 나간 명령은 못 막음.
+
+### 다음 세션에 할 일 — 우선순위
+
+1. **파지 정확도 재검증** (최우선): depth hole 수정 + color override
+   포팅 이후 상태로 여러 좌표에서 반복 테스트, 줄기를 잡는 사례가 재현되는지
+   확인. 재현되면 `DEPTH_SAFETY_MARGIN_M`을 지금(0.05) 값 그대로 유지할지
+   줄일지 실물 데이터로 재조정.
+2. **카메라 안정성**: 세션 시작 전에 다른 무거운 프로그램(다른 Claude
+   Code 세션 등) 정리 + `ros2 topic hz` 로 스트림 상태 먼저 확인하는 걸
+   습관화. 계속 불안정하면 USB 포트/케이블을 표시해두고 고정할 것(실측
+   검증된 조합을 라벨링 등으로 고정하는 것도 고려).
+3. `sync_plan.py`(RPi, git 밖)에 추가한 그리퍼 릴레이가 재부팅/재클론
+   후에도 유지되는지 확인 — 유실됐으면 이 문서의 "핵심 수정 1" 내용으로
+   재적용.
+4. 그리퍼 마운트 방향 수정(`rpy="1.562593 0 3.141593"`, git 밖)도 마찬가지로
+   재클론/재vendoring 시 유실 가능 — "그 외 수정" 절 참고해서 재적용.
+5. `harvest_sequence_node`(다중 타겟 순차 처리)는 이번 세션에 명령어만
+   확인했고 실물로 실행은 안 함 — 다음 세션 실물 end-to-end 검증 대상으로
+   여전히 남아있음.
+
+## 접근축(approach axis) 리팩터 — 방식 B의 후속 (2026-07-30)
+
+**이 절은 위 "목표를 바라보는 orientation 동적 계산 (방식 B)"을 대체한다.**
+방식 B의 방향 계산 자체는 맞았지만, 그 방향과 **웨이포인트 계산이 서로 다른 축을
+쓰고 있었다**는 것이 이번에 드러났다.
+
+### 무엇이 틀렸었나
+
+방식 B는 forward(접근 방향)를 "현재 EE → 목표"로 잡았는데, 정작 flange 목표와 정렬
+위치는 **g_base X축 성분만 빼서** 계산했다. 그리퍼 축(joint6_flange 로컬 +Z)은
+X축과 최대 29°까지 벌어지므로 두 축이 어긋났고, 그 결과:
+
+1. **손가락이 닿는 지점이 목표에서 빗나갔다** — z=0.40에서 +44mm(위로),
+   z=0.14에서 −30mm(아래로). 토마토 지름이 25~36mm이므로 양 끝에서 완전히 빗나감.
+   오차가 최소(6mm)인 z≈0.26 근방에서만 우연히 맞았다.
+2. **정렬 위치가 목표 높이와 무관하게 항상 반지름 0.102m**에 놓였다. 손목 측면
+   오프셋(URDF `joint6_to_joint5` origin의 0.0732m) 때문에 그 반지름에서는 J1이
+   최소 57° 돌아야 한다(관절공간 400만 샘플로 검증). look pose의 J1이 −7.5°이므로
+   매 사이클 60~120° 베이스 스윙이 강제됐다 — 실물 관측 "몸을 틀면서 이동한다"의
+   정체가 이것이었다.
+3. **접근 이동 방향이 그리퍼 축과 평행하지 않아** Cartesian fraction이 성공
+   구간에서조차 0.85~0.90에 머물렀고, 후퇴가 매번 OMPL 폴백으로 빠졌다.
+
+### 무엇을 바꿨나
+
+- **순서 반전**: 위치 확정 → 방향 탐색 이었던 것을 **접근축 탐색 → 그 축 위에서
+  위치 계산**으로. `flange = 목표 − 0.09·축`, `정렬 = 목표 − 0.11·축`.
+- **접근축 정의**: 방위각은 목표에서 직접, 고도각은 고정 기준점
+  `(-0.136, -0.035, 0.241)`(look pose의 flange 위치)에서 목표를 향하는 방향.
+  `atan2`라 목표 높이에 대해 연속·단조 → 낮은 목표는 위에서, 중간은 직진, 높은
+  목표는 아래에서 접근하는 프로파일이 공식 없이 나온다.
+  (방식 B가 라이브 TF의 현재 EE를 쓰던 것을 고정 기준점으로 바꾼 것 — 팔이 look
+  pose에 없을 때 축이 흔들리던 문제도 함께 해소.)
+- **탐색 공간**: 고도각 25개(−60~+60°, 5° 간격) × roll 12개. 이상 고도각에서 5°
+  이내를 한 티어로 묶고 티어 안에서 관절 이동량 최소를 채택.
+- **새 게이트 3종**: 정렬 반지름 ≥ 0.13m, flange 도달 ≤ 0.29m, 정렬 도달 ≤ 0.26m
+  (전부 실측 근거 있음 — `docs/VISUALIZATION_HANDOFF.md` 1·2절).
+
+### 결과 (RViz FakeSystem, z=0.40→0.14 스윕 27개 목표)
+
+| 지표 | 개선 전 | 개선 후 |
+|---|---|---|
+| 성공률 | 15/29 (52%) | **27/27 (100%)** |
+| 성공 구간 | z=0.26~0.38만 | z=0.14~0.40 전 구간 |
+| 관절 이동량 | 345~692° | 369~467° |
+| 손가락 도달 오차 | −30~+44mm | **0.00mm** (구성상) |
+| 후퇴 Cartesian 실패 | 거의 매 사이클 | **0건** |
+| 정렬 재시도 | 대부분 | **0건** |
+
+부수 효과로 **속도 여유도 늘었다** — 베이스 스윙이 60~120°에서 약 34°로 줄면서
+구조 진동이 작아져, `VELOCITY_SCALING`이 0.35 → 0.5로 올라갔다(실물 검증).
+`docs/SPEED_TUNING_HANDOFF.md` 6-(3)절 참고.
+
+### 남은 한계
+
+- **z ≥ 0.32는 아래에서만 접근 가능**하다. 토마토가 그 높이면 flange를 그보다 위로
+  올릴 수 없다(어깨 기준 최대 도달 0.302m). 기구학적 한계라 우회량을 줄이는 것까지가
+  최선이다.
+- **실물(sync_plan 경유) end-to-end 검증은 아직**이다. 위 스윕은 전부 RViz
+  FakeSystem이다.
+- **J1 실제 스윙 미측정** — 로그에 관절 값이 찍히지 않아 예상치(약 34°)를 확인하지
+  못했다.
+
+상세 수치와 시각화용 정리는 `docs/VISUALIZATION_HANDOFF.md`에 있다.
