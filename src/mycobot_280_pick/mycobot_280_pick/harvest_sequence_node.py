@@ -75,6 +75,12 @@ class HarvestSequenceNode(Node):
         self.create_service(
             Trigger, 'start_harvest_sequence', self._on_start_harvest
         )
+        # [2026-08-01] 시퀀스 종료 후 look pose 복귀용. coord_to_goal_node의
+        # 사이클 복귀가 armed pose로 바뀌어서, 다음 관측 전에 한 번은 카메라를
+        # 베드로 돌려놔야 한다(_return_to_look_pose 참고).
+        self._go_to_look_pose_client = self.create_client(
+            Trigger, 'go_to_look_pose'
+        )
 
         self.get_logger().info(
             'harvest_sequence_node 준비 완료. /start_harvest_sequence 서비스 대기 중 '
@@ -152,6 +158,7 @@ class HarvestSequenceNode(Node):
     def _publish_next_target(self) -> None:
         if not self._queue:
             self.get_logger().info('수확 시퀀스 완료 — 큐 비어있음.')
+            self._return_to_look_pose()
             return
 
         point, class_id, confidence, depth = self._queue.pop(0)
@@ -167,6 +174,27 @@ class HarvestSequenceNode(Node):
             f'원본 깊이={depth:.3f}m) -> g_base [{point.x:.3f}, {point.y:.3f}, '
             f'{point.z:.3f}] (남은 큐: {len(self._queue)}개)'
         )
+
+    def _return_to_look_pose(self) -> None:
+        """[2026-08-01] 시퀀스가 끝나면 look pose로 한 번 돌아간다.
+
+        `coord_to_goal_node`의 사이클 복귀가 look pose -> armed pose로 바뀌면서
+        (그 파일 ARMED_POSE_JOINT_POSITIONS 주석 참고) 시퀀스가 끝나도 팔이
+        베드를 보지 않는 자세에 남는다. 그러면 다음 `/start_harvest_sequence`가
+        쓸 `tomato_candidates`가 갱신되지 않는다 — YOLO 판단이 look pose에서만
+        열리기 때문이다.
+
+        관측은 시퀀스당 1회면 충분하므로 여기서 한 번만 돌아가면 된다.
+        서비스가 없거나 실패해도 시퀀스 자체는 이미 끝났으므로 경고만 남긴다.
+        """
+        if not self._go_to_look_pose_client.service_is_ready():
+            self.get_logger().warn(
+                '/go_to_look_pose 서비스가 없어 look pose 복귀를 건너뜀 — '
+                '다음 스냅샷 전에 수동으로 이동시킬 것.'
+            )
+            return
+        self.get_logger().info('다음 관측을 위해 look pose로 복귀 요청.')
+        self._go_to_look_pose_client.call_async(Trigger.Request())
 
     def _on_plan_result(self, msg: Bool) -> None:
         if not self._waiting_for_result:

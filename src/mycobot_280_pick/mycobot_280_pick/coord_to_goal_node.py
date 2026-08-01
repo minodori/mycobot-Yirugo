@@ -125,6 +125,48 @@ LOOK_POSE_JOINT_POSITIONS = [
     0.024435,
 ]
 
+# [2026-08-01] armed pose — 수확 사이클의 시작·종료 자세(docs/new_concept.md).
+#
+# 왜 look pose와 분리하나
+# ----------------------
+# look pose는 **카메라가 베드를 보는 자세**다(docs/look_pose.md: 실물 팔을
+# 릴리즈 상태에서 손으로 맞춰 확정했고, 기준은 시야와 충돌 회피뿐이다). 그런데
+# 이 팔은 look-then-move라 관측은 시퀀스당 1회면 충분한데, 지금까지는 **토마토
+# 1개마다** look pose로 돌아갔다. 복귀 이유가 아래 RETURN_TO_LOOK_POSE_DELAY_SEC
+# 주석에 적혀 있듯 순전히 **인식**(카메라 프레이밍)이지 기구학이 아니므로
+# 분리할 수 있다.
+#
+# 분리 효과가 큰 이유: look pose의 J1은 -7.5도인데 실측 토마토 15개가 정렬에
+# 요구하는 J1은 +10~+49도에 몰려 있다. 매 사이클 그 간격을 왕복해 왔다.
+#
+# 어떻게 정했나
+# ------------
+# J1 격자를 훑지 않았다 — 그 격자의 기준이 될 look pose 값 자체가 손으로 맞춘
+# 임의값이라 기구학적 의미가 없기 때문이다. 대신 실제 검출 토마토 15개의
+# **정렬 관절해를 모아**(scripts/sweep_targets_planned.py --collect-solutions)
+# 관절공간 minimax 중심을 좌표하강으로 구했다(scripts/find_armed_pose.py).
+# 6차원 문제이지 1차원 스윕이 아니다.
+#
+# 실측 효과 (15개 x 12회, 방향 허용오차 0.2rad, octomap 없음)
+#   왕복 6축 이동량 중앙값  look pose 1229도 -> armed pos 915도 (-26%)
+#   J1 스윙 평균            81.3도 -> 41.9도 (-48%)
+#   플래닝 성공률           양쪽 100% (기준선이 이미 포화라 개선 여지가 없었다)
+# 복귀는 joint goal이라 가는 길과 정확히 대칭이다(391/391) — 왕복 = 편도 x 2.
+#
+# 주의 1: 이 값은 **bags/lab_bed_detections.json의 토마토 15개 분포**에 맞춘
+#   값이다. 베드 위치나 카메라 자세가 크게 바뀌면 다시 도출해야 한다.
+# 주의 2: 이 자세에서는 카메라가 베드를 보지 않는다. YOLO 판단 게이팅이 안
+#   열리는데, 시퀀스 진행 중에는 그게 오히려 안전하다(자동 재트리거 방지).
+#   대신 **다음 스냅샷 전에는 반드시 look pose로 한 번 가야 한다.**
+ARMED_POSE_JOINT_POSITIONS = [
+    0.472632,    # +27.08도
+    -0.041714,   #  -2.39도
+    -1.108815,   # -63.53도
+    0.029671,    #  +1.70도
+    -1.404114,   # -80.44도
+    1.131500,    # +64.83도
+]
+
 # ---- 로봇 설정 (tomato_scene_test.py에서 확인된 값과 동일) ----
 JOINT_NAMES = [
     'joint2_to_joint1',
@@ -883,6 +925,14 @@ class CoordToGoalNode(Node):
             .get_parameter_value()
             .bool_value
         )
+        # [2026-08-01] 사이클 복귀 자세를 armed pose로 할지(기본) look pose로
+        # 되돌릴지. 실물에서 문제가 나면 재빌드 없이 바로 되돌릴 수 있어야 한다:
+        #   ros2 run ... coord_to_goal_node --ros-args -p use_armed_pose:=false
+        self.declare_parameter('use_armed_pose', True)
+        self._use_armed_pose = (
+            self.get_parameter('use_armed_pose').get_parameter_value().bool_value
+        )
+        self._return_pose_label = 'armed pose' if self._use_armed_pose else 'look pose'
         # 테스트 모드에서 target_point는 등록됐지만 아직 /confirm_grasp을
         # 못 받은 상태인지 표시. /emergency_stop이 이 상태의 대기 중인 목표도
         # 그대로 취소함(기존 로직 그대로 재사용, 아래 참고).
@@ -1094,6 +1144,10 @@ class CoordToGoalNode(Node):
 
         if self._moveit2.motion_suceeded:
             self.get_logger().info('go_to_look_pose 이동 완료.')
+            # [2026-08-01] 사이클 복귀가 armed pose로 바뀌면서, 팔이 실제로
+            # look pose에 서 있음이 보장되는 시점이 여기뿐이 됐다.
+            # APPROACH_REFERENCE_POINT 검증을 이리로 옮긴 이유다.
+            self._verify_approach_reference_point()
         else:
             self.get_logger().warn('go_to_look_pose 이동 실패 — 팔 상태 수동 확인 필요.')
 
@@ -2241,13 +2295,25 @@ class CoordToGoalNode(Node):
         )
 
     def _start_return_to_look_pose(self) -> None:
+        """[2026-08-01] 복귀 목표가 look pose -> armed pose로 바뀌었다.
+
+        정상 종료(_check_retreat_complete)와 실패 중단(_abort_to_return) 두 경로가
+        모두 이 함수로 수렴하므로 여기 한 곳만 고치면 사이클 전체가 바뀐다.
+
+        look pose로 돌아갈 필요가 없는 이유는 ARMED_POSE_JOINT_POSITIONS 주석
+        참고 — 복귀의 목적이 카메라 프레이밍인데, 이 팔은 look-then-move라
+        관측이 시퀀스당 1회면 충분하다. 다음 스냅샷 전에는 상위 노드가
+        /go_to_look_pose를 호출해야 한다.
+        """
         self._return_dwell_timer.cancel()
         self._return_dwell_timer = None
 
-        self.get_logger().info('look pose로 복귀 중...')
-        self._moveit2.move_to_configuration(
-            LOOK_POSE_JOINT_POSITIONS, joint_names=JOINT_NAMES
-        )
+        target = (ARMED_POSE_JOINT_POSITIONS if self._use_armed_pose
+                  else LOOK_POSE_JOINT_POSITIONS)
+        label = 'armed pose' if self._use_armed_pose else 'look pose'
+        self.get_logger().info(f'{label}로 복귀 중...')
+        self._return_pose_label = label
+        self._moveit2.move_to_configuration(target, joint_names=JOINT_NAMES)
         self._return_completion_timer = self.create_timer(
             COMPLETION_POLL_PERIOD, self._check_return_complete
         )
@@ -2305,11 +2371,17 @@ class CoordToGoalNode(Node):
         self._return_completion_timer = None
         self._publish_grasp_step(GRASP_STEP_IDLE)
 
+        label = getattr(self, '_return_pose_label', 'look pose')
         if self._moveit2.motion_suceeded:
-            self.get_logger().info('look pose 복귀 완료.')
-            self._verify_approach_reference_point()
+            self.get_logger().info(f'{label} 복귀 완료.')
+            # [2026-08-01] APPROACH_REFERENCE_POINT 검증은 **look pose에 있을 때만**
+            # 의미가 있다(그 상수가 look pose flange 위치이므로). armed pose로
+            # 복귀하면 당연히 안 맞아 오탐 경고가 뜬다 — 검증은
+            # _check_go_to_look_pose_complete로 옮겼다.
+            if not self._use_armed_pose:
+                self._verify_approach_reference_point()
         else:
-            self.get_logger().warn('look pose 복귀 실패 — 팔 상태 수동 확인 필요.')
+            self.get_logger().warn(f'{label} 복귀 실패 — 팔 상태 수동 확인 필요.')
 
         # [2026-07-27] 후퇴(5/5) 시작 시 낮춘 속도(RETREAT_VELOCITY_SCALING)를
         # 다음 사이클(정렬)이 정상 속도로 시작하도록 원상복구. 정상 속도
