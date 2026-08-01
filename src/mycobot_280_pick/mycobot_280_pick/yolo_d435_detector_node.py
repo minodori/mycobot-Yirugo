@@ -17,9 +17,26 @@ Octomap과 YOLO 검출이 카메라 하나를 공유해서 동시에 동작함.
 "⚠️ 사고: look pose 자동 복귀 + 실물 자동 루프" 참고, 그 문서 자체가 해법으로
 "look pose 세션 중에만 target_point를 받도록 게이팅"을 제안해뒀었음). so101이
 동일한 문제를 해결하며 검증한 설계를 그대로 이식함:
-  - 시각화(tomato_boxes/tomato_detections_image)는 look pose 여부와 무관하게
-    항상 매 프레임 발행 — "검출 자체가 안 됐는지" vs "판단 로직이 막았는지"를
-    육안으로 구분할 수 있어야 하므로.
+  - (2026-07-24 최초 설계) 시각화(tomato_boxes/tomato_detections_image)는
+    look pose 여부와 무관하게 항상 매 프레임 발행 — "검출 자체가 안 됐는지"
+    vs "판단 로직이 막았는지"를 육안으로 구분할 수 있어야 하므로.
+  - [2026-07-27 실물 조정, 되돌림] 위 "항상 추론"이 실물 세션에서 CPU를
+    상시 크게 잡아먹어(다른 노드/카메라 드라이버와 경합) 시스템 부하가
+    쌓이고 카메라 스트림 자체가 불안정해지는 악순환의 주요 원인 중 하나로
+    확인됨 — 추론 자체를 look pose 누적 구간에서만 돌리도록 되돌림(트레이드
+    오프: 평소엔 tomato_boxes/detections_image가 안 갱신됨, "검출 안 됨" vs
+    "판단 로직이 막음" 육안 구분 능력을 CPU 부하와 맞바꾼 것 — 사용자 확인
+    후 적용).
+  - [2026-07-28, 다시 원복] 위 진단이 틀렸음이 밝혀짐 — 진짜 CPU 주범은
+    YOLO 추론이 아니라 Octomap 파이프라인(realsense `pointcloud.enable`이
+    켜져 있던 것 + `pointcloud_tomato_filter_node`, 둘 다 단독으로 CPU
+    100%+ 관측)이었음. so101-ros-physical-ai 자매 프로젝트는 같은 D435로
+    매 프레임 실시간 추론을 해도 부하가 훨씬 낮은데, 그 프로젝트엔 애초에
+    Octomap/pointcloud 파이프라인이 없다는 게 유일한 구조적 차이였음
+    (demo_octomap.launch.py의 `pointcloud.enable` 삭제와 짝을 이루는
+    변경). 그래서 시각화는 다시 매 프레임 실시간으로 되돌림 — Octomap을
+    같이 켜는 세션(위 [2026-07-27] 문단이 우려했던 상황)에서 다시 부하
+    문제가 재현되면 이 게이팅을 재적용할 것.
   - "판단"(target_point/tomato_candidates)은 팔이 look pose
     (LOOK_POSE_JOINT_POSITIONS, /joint_states로 확인)에 있을 때만
     ACCUMULATION_WINDOW_SEC초 동안 프레임을 누적 -> 3D 위치로 클러스터링 ->
@@ -46,6 +63,14 @@ Octomap과 YOLO 검출이 카메라 하나를 공유해서 동시에 동작함.
     "camera_color_optical_frame" — align_depth로 depth를 color 프레임에
     맞췄으므로 두 이미지 다 이 프레임 기준).
   - point: 위 프레임 기준 3D 좌표 (m 단위, depth 반지름 보정 반영됨)
+
+발행: target_radius_m (std_msgs/msg/Float32) — [2026-07-27, 그리퍼 폭
+  동적화] target_point가 가리키는 대상의 클러스터 평균 추정 반지름
+  (MIN/MAX_ESTIMATED_RADIUS_M로 clamp된 값, 위 _estimate_radius_m 참고).
+  target_point보다 먼저 발행함 — coord_to_goal_node가 target_point 콜백
+  시점에 이미 이 값을 받아둔 상태이도록 순서를 맞춘 것(별개 토픽이라 완벽한
+  원자성 보장은 아니지만, 그리퍼 폭 참고용 정보라 약간의 지연은 무해함).
+  coord_to_goal_node가 이 값으로 그리퍼 열림 폭을 대상 크기에 맞게 조정함.
 
 발행: tomato_boxes (std_msgs/msg/Float32MultiArray) — 이번 추론에서 검출된
 "모든" bbox(클래스/ripe 여부 무관, [x1,y1,x2,y2, x1,y1,x2,y2, ...] 평탄화된
@@ -96,6 +121,9 @@ import math
 import os
 import sys
 
+import cv2
+import numpy as np
+
 # cv_bridge(시스템 opencv 필요)와 ultralytics(사용자 site-packages에만 있음)를
 # 이 프로세스 하나에서 동시에 써야 해서, PYTHONNOUSERSITE로 통째로 빼는 대신
 # 시스템 dist-packages를 사용자 site-packages보다 먼저 검색하도록만 재정렬함.
@@ -110,17 +138,42 @@ import message_filters
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image, JointState
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32, Float32MultiArray
 from ultralytics import YOLO
 
+# [2026-07-27] 이전 세션엔 실물 검출이 전부 'rotten'으로 잡혀서 임시로
+# 'rotten'을 타겟으로 바꿔뒀었는데, 오늘 재확인해보니 'ripe'로 정상 검출됨
+# (모델/조명/각도 등 조건이 달라진 것으로 추정) — 원래 의도한 'ripe'로 복귀.
+# [2026-07-27 후속] 이 오분류의 진짜 원인이 밝혀짐 — 아래 COLOR_OVERRIDE
+# 설명 참고. 3D 프린트 소품(실제 토마토 아님) 특유의 단색이라 모델(v6)이
+# 색 계열을 자주 틀리는 것으로, pick8.py(다른 파이프라인, 같은 v6 모델
+# 사용)에서 이미 원인 규명 + 색상 기반 보정으로 해결한 전례를 그대로 포팅함.
 TARGET_CLASS_NAME = 'ripe'
+# TARGET_CLASS_NAME = 'rotten'
 CONFIDENCE_THRESHOLD = 0.4
+
+# [2026-07-27, pick8.py에서 포팅] 3D 프린트 방울토마토 색 보정.
+# 문제: v6 모델은 박스 위치는 잘 잡는데 색 계열 분류를 틀린다 —
+# 초록 3D 소품 → ripe로, 노랑 3D 소품 → unripe로 자주 오분류함(pick8.py에서
+# 실측 확인된 것과 동일 증상, 이 노드에서 'rotten'으로 몰린 것도 같은 부류의
+# 오분류로 추정). 우리가 쓰는 3D 프린트 토마토는 색이 빨강/초록/노랑
+# 3가지뿐이라, 박스 안의 지배적 HSV 색상으로 클래스를 덮어씀:
+#     빨강 = ripe / 초록 = unripe / 노랑 = disease
+# ⚠️ 이건 '3D 프린트 소품' 전용 규칙이다. 실제 토마토는 익어가는 중간색이
+# 있어 이 규칙이 틀림 — 실물 토마토로 갈 땐 COLOR_OVERRIDE_ENABLED=False로
+# 끄고, 3D 소품이 아닌 실제 토마토로 재학습한 모델을 쓸 것(pick8.py의
+# 같은 경고 그대로 적용됨).
+COLOR_OVERRIDE_ENABLED = True
+COLOR_MIN_RATIO = 0.25
 
 # [2026-07-24, 수확 순차 처리] 모델 4클래스({ripe, unripe, rotten, disease}) 중
 # 실제 수확/제거 대상. harvest_sequence_node가 이 후보 목록을 받아 look pose
 # 스냅샷 기준으로 깊이(z) 오름차순 정렬해 순차 접근함(docs/
 # obstacle_avoidance_manual_test.md "수확 순차 처리" 절 참고).
-HARVEST_CLASS_NAMES = ('ripe', 'disease')
+# 주의: TARGET_CLASS_NAME이 여기 없는 클래스면 _accumulate_detections()에서
+# 애초에 걸러져 누적 버퍼에 들어가지도 않음 — TARGET_CLASS_NAME을 바꿀 땐
+# 이 목록에도 포함돼 있는지 항상 같이 확인할 것.
+HARVEST_CLASS_NAMES = ('ripe', 'rotten', 'disease')
 
 # [Tier2] coord_to_goal_node.py의 JOINT_NAMES/LOOK_POSE_JOINT_POSITIONS와
 # 반드시 동일해야 함(원본 확정값: docs/look_pose.md). 이 노드가
@@ -147,22 +200,75 @@ LOOK_POSE_JOINT_POSITIONS = [
 LOOK_POSE_TOLERANCE_RAD = 0.08
 
 # [Tier2] look pose 도착 후 판단을 위해 프레임을 누적하는 시간(so101 검증값).
-ACCUMULATION_WINDOW_SEC = 2.0
+# [2026-07-27 실물 조정] 카메라 케이블 지터로 color/depth 동기화 콜백 자체가
+# 드물게만 들어와서(아래 ApproximateTimeSynchronizer 참고) 2초 안에 한 번도
+# 못 잡는 경우가 실물에서 반복 확인됨 — 잡을 기회를 늘리기 위해 늘림.
+ACCUMULATION_WINDOW_SEC = 5.0
 # [Tier2] 3D 위치 기준 클러스터링 거리 임계값 — 이 이내면 같은 대상으로 취급
 # (같은 클래스인 경우만, so101 검증값).
 CLUSTER_DISTANCE_M = 0.03
 
-# [Tier3, depth 반지름 보정] 추정 반지름의 상하한 clamp — 실측 토마토
-# 지름(~4cm)보다 넉넉한 범위(so101이 검증한 값과 동일).
-MIN_ESTIMATED_RADIUS_M = 0.015
-MAX_ESTIMATED_RADIUS_M = 0.035
+# bbox 크기로 추정한 물체 반지름의 상하한 clamp(m) — 실측 토마토 두 종류
+# (지름 25mm/36mm)의 반지름과 동일. depth 표면→중심 보정(아래
+# _estimate_radius_m)과 coord_to_goal_node의 그리퍼 개방폭 결정(target_
+# radius_m) 양쪽에 다 쓰이므로, coord_to_goal_node.py의 GRIPPER_TARGET_
+# RADIUS_MIN/MAX_M과 반드시 같은 값으로 유지할 것(두 노드가 독립 실행
+# 파일이라 값을 import로 공유하지 않음).
+MIN_ESTIMATED_RADIUS_M = 0.0125  # 25mm 지름 토마토의 반지름
+MAX_ESTIMATED_RADIUS_M = 0.018   # 36mm 지름 토마토의 반지름
+
+# 반지름 보정(표면→중심) 이후 최종 depth에서 추가로 빼는 고정 여유(m) —
+# g_base 기준 X(팔이 뻗는 깊이)가 그만큼 줄어듦. [2026-07-28] 0으로 변경 —
+# 그리퍼를 flange 목표에 그대로 보내 실측한 결과, flange가 실제 토마토
+# 표면보다 항상 정확히 이 값(당시 0.05)만큼 못 미쳤음이 서로 다른 두 목표
+# 좌표에서 재현 확인됨(RViz+TF 실측, 그리퍼 길이 보정과는 무관하게 flange
+# 자체 도달 거리에서 나타난 오차). 이 상수가 도입됐던 3~5차 조정 당시엔
+# bbox 중심 픽셀 depth hole 버그(아래 _robust_bbox_depth_m)가 아직
+# 안 고쳐진 상태라 그 노이즈까지 뭉뚱그려 보정하려던 것이었는데, 그 버그가
+# 고쳐진 지금은 이 보정 자체가 정확히 실측 오차만큼 과보정하고 있었던
+# 것으로 확인됨 — 값을 0으로 되돌림. 다시 부족/과함이 보이면 실측 기반으로
+# 재조정할 것.
+DEPTH_SAFETY_MARGIN_M = 0.0
 
 DEFAULT_MODEL_PATH = os.path.expanduser(
-    '~/Projects/Eval_Yolo/tomato_4cls_model.pt'
+    # '~/Projects/Eval_Yolo/tomato_4cls_model.pt'
+    '~/Projects/Eval_Yolo/tomato_4cls_v6.pt'
 )
 DEFAULT_COLOR_TOPIC = '/camera/camera/color/image_raw'
 DEFAULT_DEPTH_TOPIC = '/camera/camera/aligned_depth_to_color/image_raw'
 DEFAULT_CAMERA_INFO_TOPIC = '/camera/camera/aligned_depth_to_color/camera_info'
+
+
+def _classify_by_color(bgr, x1, y1, x2, y2):
+    """[2026-07-27, pick8.py 포팅] 박스 안 지배적 HSV 색상 -> 클래스 이름.
+    판단 불가면 None(=YOLO 원래 클래스 유지). 위 COLOR_OVERRIDE_ENABLED
+    설명 참고 — 3D 프린트 소품 전용 색상표(빨강/초록/노랑 3색)에 맞춘
+    Hue 범위이며, pick8.py에서 실측으로 확정한 값을 그대로 사용함.
+    """
+    h0, w0 = bgr.shape[:2]
+    # 테두리·배경 섞임을 줄이려 안쪽 60%만 본다.
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    bw, bh = (x2 - x1) * 0.3, (y2 - y1) * 0.3
+    a = max(0, int(cx - bw))
+    b = min(w0, int(cx + bw))
+    c = max(0, int(cy - bh))
+    d = min(h0, int(cy + bh))
+    if b - a < 3 or d - c < 3:
+        return None
+    hsv = cv2.cvtColor(bgr[c:d, a:b], cv2.COLOR_BGR2HSV)
+    h_ch, s_ch, v_ch = hsv[:, :, 0].astype(int), hsv[:, :, 1].astype(int), hsv[:, :, 2].astype(int)
+    ok = (s_ch >= 90) & (v_ch >= 60)  # 채도·명도 낮은 화소(그림자·배경)는 버림
+    n = int(ok.sum())
+    if n < 20:
+        return None
+    hue = h_ch[ok]
+    counts = {
+        'ripe': int(((hue <= 10) | (hue >= 170)).sum()),  # 빨강
+        'disease': int(((hue >= 20) & (hue <= 35)).sum()),  # 노랑
+        'unripe': int(((hue >= 40) & (hue <= 90)).sum()),  # 초록
+    }
+    best = max(counts, key=counts.get)
+    return best if counts[best] / n >= COLOR_MIN_RATIO else None
 
 
 def _is_near_look_pose(positions_by_name: dict) -> bool:
@@ -171,6 +277,26 @@ def _is_near_look_pose(positions_by_name: dict) -> bool:
         if current_value is None or abs(current_value - look_value) > LOOK_POSE_TOLERANCE_RAD:
             return False
     return True
+
+
+def _robust_bbox_depth_m(depth_image, x1, y1, x2, y2):
+    """[2026-07-27, 실물에서 발견] bbox 중심 픽셀 딱 한 점만 보면 D435 depth
+    hole(반사/각도로 특정 픽셀만 무효(0)인 경우 — 컬러 검출은 성공하는데
+    정확히 그 지점만 depth=0이라 매번 조용히 스킵되는 것을 실물 캡처로 직접
+    재현/확인함)에 취약함. bbox 영역 전체에서 유효한(0이 아닌) depth 값들의
+    중앙값을 사용 — bbox가 물체에 타이트하게 잡히는 게 보통이라 배경이 섞여
+    들어와도 중앙값이면 견고함. 유효 픽셀이 하나도 없으면 None.
+    """
+    height, width = depth_image.shape[:2]
+    xi1 = min(max(int(x1), 0), width - 1)
+    yi1 = min(max(int(y1), 0), height - 1)
+    xi2 = min(max(int(x2), 0), width - 1)
+    yi2 = min(max(int(y2), 0), height - 1)
+    region = depth_image[yi1:yi2 + 1, xi1:xi2 + 1]
+    valid = region[region > 0]
+    if valid.size == 0:
+        return None
+    return float(np.median(valid)) / 1000.0
 
 
 def _estimate_radius_m(x1, y1, x2, y2, depth_m, fx, fy):
@@ -185,13 +311,15 @@ def _estimate_radius_m(x1, y1, x2, y2, depth_m, fx, fy):
 
 
 def _cluster_detections(detections):
-    """[Tier2] 누적된 검출(class_id, x, y, z, confidence) 리스트를 3D 위치
-    기준으로 클러스터링함(같은 class_id + CLUSTER_DISTANCE_M 이내 거리면 같은
-    대상으로 취급, 평균 위치/신뢰도로 병합). so101이 실물로 검증한 방식과 동일.
-    반환: [{'class_id','x','y','z','confidence','count'}, ...]
+    """[Tier2] 누적된 검출(class_id, x, y, z, confidence, radius_m) 리스트를
+    3D 위치 기준으로 클러스터링함(같은 class_id + CLUSTER_DISTANCE_M 이내
+    거리면 같은 대상으로 취급, 평균 위치/신뢰도/반지름으로 병합). so101이
+    실물로 검증한 방식과 동일(반지름 평균은 [2026-07-27, 그리퍼 폭 동적화]
+    추가분).
+    반환: [{'class_id','x','y','z','confidence','radius_m','count'}, ...]
     """
     clusters = []
-    for class_id, x, y, z, confidence in detections:
+    for class_id, x, y, z, confidence, radius_m in detections:
         matched = None
         for cluster in clusters:
             if cluster['class_id'] != class_id:
@@ -214,6 +342,7 @@ def _cluster_detections(detections):
                 'sum_y': y,
                 'sum_z': z,
                 'sum_conf': confidence,
+                'sum_radius': radius_m,
                 'count': 1,
             })
         else:
@@ -221,6 +350,7 @@ def _cluster_detections(detections):
             matched['sum_y'] += y
             matched['sum_z'] += z
             matched['sum_conf'] += confidence
+            matched['sum_radius'] += radius_m
             matched['count'] += 1
 
     return [
@@ -230,6 +360,7 @@ def _cluster_detections(detections):
             'y': cluster['sum_y'] / cluster['count'],
             'z': cluster['sum_z'] / cluster['count'],
             'confidence': cluster['sum_conf'] / cluster['count'],
+            'radius_m': cluster['sum_radius'] / cluster['count'],
             'count': cluster['count'],
         }
         for cluster in clusters
@@ -263,6 +394,8 @@ class YoloD435DetectorNode(Node):
 
         self.get_logger().info(f'YOLO 모델 로드 중: {model_path}')
         self._model = YOLO(model_path)
+        # [2026-07-27, COLOR_OVERRIDE용] 클래스 이름 -> id 역방향 조회.
+        self._class_name_to_id = {name: idx for idx, name in self._model.names.items()}
         self._bridge = CvBridge()
         self._intrinsics = None  # (fx, fy, cx, cy), camera_info 수신 시 채워짐
         self._frame_id = None
@@ -274,6 +407,11 @@ class YoloD435DetectorNode(Node):
         self._accumulation_timer = None
 
         self._publisher = self.create_publisher(PointStamped, 'target_point', 10)
+        # [2026-07-27, 그리퍼 폭 동적화] target_point와 함께 발행되는 대상
+        # 추정 반지름 — coord_to_goal_node가 그리퍼 열림 폭을 정하는 데 씀.
+        self._target_radius_publisher = self.create_publisher(
+            Float32, 'target_radius_m', 10
+        )
         self._boxes_publisher = self.create_publisher(
             Float32MultiArray, 'tomato_boxes', 10
         )
@@ -293,13 +431,19 @@ class YoloD435DetectorNode(Node):
 
         color_sub = message_filters.Subscriber(self, Image, color_topic)
         depth_sub = message_filters.Subscriber(self, Image, depth_topic)
+        # [2026-07-27 실물 조정] 카메라 케이블이 마진널해서 color/depth 스트림에
+        # 순간적으로 최대 0.3~0.4초 정도 지터가 생기는 게 실측 확인됨 — 기존
+        # slop=0.05초는 이보다 훨씬 타이트해서 대부분의 프레임 쌍이 동기화
+        # 실패로 버려지고 있었을 가능성이 높음(콜백 자체가 거의 안 불림).
+        # slop을 넉넉히 늘리고 queue_size도 키워 버퍼링 여유를 둠.
         self._synchronizer = message_filters.ApproximateTimeSynchronizer(
-            [color_sub, depth_sub], queue_size=5, slop=0.05
+            [color_sub, depth_sub], queue_size=15, slop=0.3
         )
         self._synchronizer.registerCallback(self._on_synced_images)
 
         self.get_logger().info(
-            f'yolo_d435_detector_node 준비 완료. 시각화는 항상 발행하고, '
+            f'yolo_d435_detector_node 준비 완료. 추론/시각화는 '
+            f'매 프레임 실시간 발행(2026-07-28 원복), '
             f"'{TARGET_CLASS_NAME}' 등 판단은 look pose에서 "
             f'{ACCUMULATION_WINDOW_SEC}초 누적 후 1회만 /target_point에 '
             f'발행합니다. color={color_topic}, depth={depth_topic}'
@@ -355,6 +499,11 @@ class YoloD435DetectorNode(Node):
         self._publish_best_target(clusters)
 
     def _publish_candidates(self, clusters) -> None:
+        # [2026-07-31] stride 5 -> 7. 오프라인 스윕 시뮬레이션(로봇/베드 없이
+        # 노트북에서 수확 경로를 평가)에 대상의 **크기**와 관측 신뢰도가 필요해서
+        # radius_m와 count를 추가함. 둘 다 이미 클러스터에 들어 있던 값이라
+        # 추가 계산은 없음. 소비자는 harvest_sequence_node와
+        # scripts/export_detections.py 두 곳이며 같이 갱신했다.
         flat = []
         for cluster in clusters:
             flat.extend([
@@ -363,26 +512,35 @@ class YoloD435DetectorNode(Node):
                 cluster['y'],
                 cluster['z'],
                 cluster['confidence'],
+                cluster['radius_m'],
+                float(cluster['count']),
             ])
         msg = Float32MultiArray()
         msg.data = flat
         self._candidates_publisher.publish(msg)
 
     def _publish_best_target(self, clusters) -> None:
-        ripe_clusters = [
+        target_clusters = [
             c for c in clusters
             if self._model.names[c['class_id']] == TARGET_CLASS_NAME
         ]
-        if not ripe_clusters:
+        if not target_clusters:
             self.get_logger().info(
-                '누적 구간 동안 ripe 대상 없음 — target_point 미발행'
+                f"누적 구간 동안 '{TARGET_CLASS_NAME}' 대상 없음 — target_point 미발행"
             )
             return
 
         # confidence 최댓값이 아니라 관측 횟수 우선(더 안정적인 클러스터
         # 선택) -> 그다음 confidence 순 (so101 검증 기준).
-        ripe_clusters.sort(key=lambda c: (c['count'], c['confidence']), reverse=True)
-        best = ripe_clusters[0]
+        target_clusters.sort(key=lambda c: (c['count'], c['confidence']), reverse=True)
+        best = target_clusters[0]
+
+        # target_point보다 먼저 발행(위 모듈 docstring "target_radius_m" 설명
+        # 참고) — coord_to_goal_node가 target_point를 받을 때 이미 최신
+        # 반지름을 캐시해둔 상태이길 기대함.
+        radius_msg = Float32()
+        radius_msg.data = best['radius_m']
+        self._target_radius_publisher.publish(radius_msg)
 
         msg = PointStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -391,7 +549,8 @@ class YoloD435DetectorNode(Node):
         self._publisher.publish(msg)
         self.get_logger().info(
             f"{TARGET_CLASS_NAME} 판단 완료(관측 {best['count']}회, "
-            f"평균 conf={best['confidence']:.2f}): 카메라 기준 좌표="
+            f"평균 conf={best['confidence']:.2f}, 추정 반지름="
+            f"{best['radius_m'] * 1000:.1f}mm): 카메라 기준 좌표="
             f"[{best['x']:.3f}, {best['y']:.3f}, {best['z']:.3f}]"
         )
 
@@ -429,16 +588,22 @@ class YoloD435DetectorNode(Node):
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             cx = min(max(int((x1 + x2) / 2), 0), width - 1)
             cy = min(max(int((y1 + y2) / 2), 0), height - 1)
-            raw_depth = float(depth_image[cy, cx]) / 1000.0
-            if raw_depth <= 0.0:
+            # [2026-07-27 실물 조정] 중심 픽셀 딱 한 점만 보면 depth hole(반사/
+            # 각도로 그 지점만 무효 depth인 경우, 실물에서 실제 재현 확인 —
+            # 컬러 검출은 성공하는데 중심 픽셀 depth=0이라 매번 조용히
+            # 스킵되고 있었음)에 취약함. bbox 영역 전체에서 유효한(0이 아닌)
+            # depth 값들의 중앙값을 사용 — 배경이 섞여 들어와도(bbox가 물체에
+            # 타이트하게 잡히는 경우가 대부분이라) 중앙값이라 견고함.
+            raw_depth = _robust_bbox_depth_m(depth_image, x1, y1, x2, y2)
+            if raw_depth is None:
                 continue
 
             radius_m = _estimate_radius_m(x1, y1, x2, y2, raw_depth, fx, fy)
-            depth = raw_depth + radius_m
+            depth = raw_depth + radius_m - DEPTH_SAFETY_MARGIN_M
             x = (cx - ppx) * depth / fx
             y = (cy - ppy) * depth / fy
             self._accumulated_detections.append(
-                (class_id, x, y, depth, float(box.conf[0]))
+                (class_id, x, y, depth, float(box.conf[0]), radius_m)
             )
 
     def _publish_annotated_image(self, result, header) -> None:
@@ -451,6 +616,21 @@ class YoloD435DetectorNode(Node):
         if self._intrinsics is None:
             return
 
+        # [2026-07-28 원복] 2026-07-27에 "look pose 누적 구간에서만 추론"으로
+        # 되돌렸던 이유는 CPU 경합으로 인한 카메라 스트림 불안정이었는데,
+        # 그 부하의 실제 주범은 YOLO 추론 자체가 아니라 Octomap 파이프라인
+        # (realsense pointcloud.enable=true + pointcloud_tomato_filter_node,
+        # 둘 다 그 자체로 CPU 100%+ 관측됨)이었음이 이번에 밝혀짐 — so101-
+        # ros-physical-ai 자매 프로젝트는 같은 D435로 매 프레임 실시간 추론을
+        # 해도 부하가 훨씬 낮은데, 그 프로젝트엔 애초에 Octomap/pointcloud
+        # 파이프라인이 없다는 게 유일한 구조적 차이였음(demo_octomap.launch.py
+        # 쪽 pointcloud.enable 수정과 짝을 이루는 변경). 그래서 시각화
+        # (tomato_boxes/detections_image)는 다시 look pose 여부와 무관하게
+        # 매 프레임 발행 — "검출 자체가 안 됐는지" vs "판단 로직이 막았는지"를
+        # 육안으로 바로 구분할 수 있음. "판단"(target_point/tomato_candidates,
+        # 아래 _accumulate_detections 호출)은 CPU가 아니라 자동 재트리거 사고
+        # 방지가 목적인 별개 안전장치라 그대로 look pose 게이팅 유지함(위 모듈
+        # docstring 참고).
         image = self._bridge.imgmsg_to_cv2(color_msg, desired_encoding='bgr8')
         depth_image = self._bridge.imgmsg_to_cv2(
             depth_msg, desired_encoding='passthrough'
@@ -458,15 +638,25 @@ class YoloD435DetectorNode(Node):
 
         result = self._model.predict(image, conf=CONFIDENCE_THRESHOLD, verbose=False)[0]
 
-        # [Tier2] 시각화는 look pose 여부와 무관하게 항상 발행.
+        if COLOR_OVERRIDE_ENABLED and len(result.boxes) > 0:
+            # result.boxes.data의 마지막 열이 class id — 슬라이스라 덮어쓰면
+            # .cls/plot() 등 이후 전부 이 값을 그대로 읽음(ultralytics 내부
+            # 구현 확인함, pick8.py의 COLOR_OVERRIDE와 동일한 목적). 단,
+            # predict() 결과 텐서는 torch inference_mode 텐서라 clone() 없이
+            # in-place로 건드리면 "Inplace update to inference tensor..."
+            # RuntimeError가 남 — 직접 재현해서 확인함, 반드시 clone 먼저.
+            result.boxes.data = result.boxes.data.clone()
+            for i, box in enumerate(result.boxes):
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                color_class = _classify_by_color(image, x1, y1, x2, y2)
+                if color_class is not None:
+                    result.boxes.data[i, -1] = float(self._class_name_to_id[color_class])
+
         self._publish_tomato_boxes(result)
         self._publish_annotated_image(result, color_msg.header)
 
-        # "판단"은 look pose 누적 구간에서만 진행(모듈 docstring 참고).
-        if not self._at_look_pose or self._judgment_locked:
-            return
-
-        self._accumulate_detections(result, depth_image)
+        if self._at_look_pose and not self._judgment_locked:
+            self._accumulate_detections(result, depth_image)
 
 
 def main():

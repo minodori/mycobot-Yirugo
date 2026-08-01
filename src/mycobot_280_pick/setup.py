@@ -13,6 +13,9 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob.glob('launch/*.launch.py')),
+        # [2026-07-31] scene_replay.launch.py가 FindPackageShare로 RViz 설정을
+        # 찾으므로 설치 대상에 포함해야 한다.
+        ('share/' + package_name + '/config', glob.glob('config/*.rviz')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

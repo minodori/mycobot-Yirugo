@@ -4,13 +4,13 @@
 			"path": "."
 		},
 		{
-			"path": "../Eval_Yolo"
-		},
-		{
 			"path": "../roscamp-repo-1"
 		},
 		{
 			"path": "../moveit_calibration"
+		},
+		{
+			"path": "../so101-ros-physical-ai"
 		}
 	],
 	"settings": {

@@ -104,6 +104,18 @@ COMPLETION_POLL_PERIOD = 0.2
 RETURN_TO_LOOK_POSE_DELAY_SEC = 1.5
 
 # SRDF(firefighter.srdf)의 look_pose group_state와 동일 (docs/look_pose.md).
+#
+# ⚠️ [2026-07-30] 이 값을 바꾸면 **같이 고쳐야 하는 곳이 4군데** 있다:
+#   1. firefighter.srdf 의 <group_state name="look_pose">     (RViz 드롭다운)
+#   2. initial_positions.yaml                                  (FakeSystem 시작 자세)
+#   3. yolo_d435_detector_node.py 의 같은 이름 상수             (검출 게이트)
+#   4. **APPROACH_REFERENCE_POINT** — 이 관절값의 순기구학 결과이며,
+#      접근 고도각 프로파일 전체가 그 점을 기준으로 계산된다.
+#
+# 1~3은 어긋나면 증상이 바로 보이지만(RViz 자세 불일치, 검출이 안 열림 등),
+# 4는 **에러 없이 접근 각도만 조금씩 틀어져** 알아채기 어렵다. 그래서 팔이
+# look pose에 도착할 때마다 TF로 자동 대조하도록 해뒀다
+# (_verify_approach_reference_point) — 어긋나면 로그에 경고가 뜬다.
 LOOK_POSE_JOINT_POSITIONS = [
     -0.130376,
     1.816190,
@@ -292,6 +304,11 @@ APPROACH_ELEVATION_CANDIDATES_RAD = [
 # "비틀어진다"는 관측이 나온 것도 이 기준이 목표 높이를 전혀 안 봤기
 # 때문이었음.
 APPROACH_REFERENCE_POINT = [-0.1363, -0.0346, 0.2408]
+
+# 위 상수와 실제 look pose flange 위치의 허용 오차(m). 팔이 look pose에 도착할
+# 때마다 TF로 대조해 이보다 크게 어긋나면 경고한다(_verify_approach_reference_point).
+# 실물은 정지 오차/컨트롤러 tolerance가 있으므로 1cm 정도 여유를 둠.
+APPROACH_REFERENCE_TOLERANCE_M = 0.01
 
 # 이상 고도각에서 이 각도 안쪽인 후보들을 한 티어로 묶어 함께 평가함(티어
 # 안에서는 관절 이동량 최소로 고름).
@@ -527,8 +544,8 @@ PLANNING_ATTEMPTS = 10
 #
 # 상한은 여전히 위 ⚠️의 0.65(서보 speed 상한) — 그건 기하와 무관한
 # SPEED_GAIN_K 천장이므로 이번 변경으로 완화되지 않음.
-VELOCITY_SCALING = 0.5 #0.35 #0.5 #0.2 #0.1
-ACCELERATION_SCALING = 0.25 #0.35 #0.1
+VELOCITY_SCALING = 0.2 #0.35 #0.5 #0.2 #0.1
+ACCELERATION_SCALING = 0.1 #0.25 #0.35 #0.1
 
 # 후퇴(5/5) + look pose 복귀 구간(그리퍼가 물체를 쥔 채 움직이는 유일한
 # 구간)의 속도/가속 스케일 — 일반 VELOCITY_SCALING(0.1)보다 낮춰서 파지한
@@ -963,6 +980,8 @@ class CoordToGoalNode(Node):
         )
         # [2026-07-30] 접근축 후보(고도각) 목록과 그 안의 현재 인덱스 —
         # _build_approach_elevation_candidates가 목표마다 새로 만듦.
+        # look pose 도착 시 APPROACH_REFERENCE_POINT 검증을 한 번만 수행하기 위한 플래그.
+        self._approach_reference_checked = False
         self._approach_candidates = []
         self._approach_candidate_index = 0
         self._roll_search_index = 0
@@ -1502,12 +1521,50 @@ class CoordToGoalNode(Node):
         if not self._approach_candidates:
             # 어떤 고도각으로도 사각지대를 벗어나지 못하는 목표 — 예전처럼
             # 수평 접근으로 강행하는 대신, 팔을 꼬아가며 실패할 것이 예측되는
-            # 상황이므로 실행을 거부함(로그로 사유를 남겨 목표 위치 자체를
-            # 재검토할 수 있게 함).
+            # 상황이므로 실행을 거부함.
+            #
+            # [2026-07-30] 거부 사유를 진단 가능하게 고침. 예전 메시지는 "목표가
+            # 베이스에 너무 가까움"이라고만 해서, 실제로 겪은 두 가지 혼동을
+            # 구분해주지 못했음:
+            #   (1) 기구학적 한계인가, 아니면 고도각 후보 상한(설정) 탓인가
+            #   (2) 애초에 좌표를 잘못 준 것 아닌가 — pymycobot send_coords는
+            #       **flange** 위치를 받는데 /target_point는 **토마토**(손가락이
+            #       닿을 지점) 위치라, send_coords로 잘 가던 좌표를 그대로
+            #       발행하면 정렬 위치가 그리퍼 길이+standoff만큼 더 안쪽으로
+            #       당겨져 이 분기에 걸린다(실제로 발생함).
+            # 그래서 필요한 최소 고도각을 역산해 함께 찍는다.
+            target_radius = math.hypot(
+                self._pending_tomato_position[0], self._pending_tomato_position[1]
+            )
+            pullback = GRIPPER_LENGTH_OFFSET_M + APPROACH_STANDOFF_M
+            cos_needed = (target_radius - MIN_ALIGN_RADIUS_M) / pullback
+            # 정렬 반지름 = 목표 반지름 - pullback*cos(고도각) 이고, 고도각의
+            # 물리적 상한이 ±90도라 cos(고도각) >= 0이다. 따라서 cos_needed < 0
+            # (= 목표 반지름 < MIN_ALIGN_RADIUS_M)이면 사다리를 아무리 넓혀도
+            # 불가능하다 — 이 경우와 "사다리가 좁아서 못 하는" 경우를 구분해
+            # 찍어야 오해가 없다.
+            if cos_needed < 0.0:
+                needed = (
+                    f'목표 반지름이 최소 정렬 반지름({MIN_ALIGN_RADIUS_M}m)보다 '
+                    '작아 고도각을 ±90도까지 넓혀도 불가능함(구조적 한계)'
+                )
+            else:
+                needed_deg = math.degrees(math.acos(min(1.0, cos_needed)))
+                ladder_max = max(
+                    abs(math.degrees(e)) for e in APPROACH_ELEVATION_CANDIDATES_RAD
+                )
+                needed = (
+                    f'정렬 반지름 {MIN_ALIGN_RADIUS_M}m를 확보하려면 |고도각| ≥ '
+                    f'{needed_deg:.1f}도가 필요한데 후보 상한이 {ladder_max:.0f}도임'
+                )
             self._abort_to_return(
-                f'접근축을 어떻게 기울여도 정렬 위치가 최소 반지름'
-                f'({MIN_ALIGN_RADIUS_M}m)을 확보하지 못함 — 목표가 베이스에 '
-                f'너무 가까움: {[round(c, 3) for c in self._pending_tomato_position]}'
+                f'접근축 후보가 하나도 없음 — 목표 '
+                f'{[round(c, 3) for c in self._pending_tomato_position]} '
+                f'(반지름 {target_radius:.3f}m). {needed}. '
+                f'참고: /target_point는 flange가 아니라 **토마토**(그리퍼 손가락이 '
+                f'닿을 지점) 위치임 — pymycobot send_coords 기준 좌표를 그대로 '
+                f'발행했다면 그리퍼 길이 {GRIPPER_LENGTH_OFFSET_M}m만큼 바깥쪽 '
+                f'좌표를 줘야 함'
             )
             return
 
@@ -2195,6 +2252,51 @@ class CoordToGoalNode(Node):
             COMPLETION_POLL_PERIOD, self._check_return_complete
         )
 
+    def _verify_approach_reference_point(self) -> None:
+        """[2026-07-30] APPROACH_REFERENCE_POINT가 실제 look pose와 맞는지 확인.
+
+        이 상수는 상수처럼 생겼지만 실제로는 LOOK_POSE_JOINT_POSITIONS의 순기구학
+        **결과**다. 즉 look pose를 바꾸면 조용히 낡는다 — 그런데 낡아도 에러가
+        나지 않고 접근 고도각만 조금씩 틀어질 뿐이라(실측: look pose를 5~15도
+        움직여도 이상 고도각 오차는 1~3도) 알아채기 어렵다.
+
+        팔이 실제로 look pose에 도착한 직후는 flange 위치를 TF로 바로 읽을 수
+        있는 유일한 시점이므로, 여기서 상수와 대조해 어긋나면 경고한다. 한 번만
+        경고하고 이후엔 침묵한다(매 사이클 반복되면 로그만 시끄러움).
+
+        move_group에 /compute_fk를 물어보는 방법도 있지만, 기동 시 블로킹 의존성과
+        실패 경로가 늘어나는 데 비해 효과(1~3도)가 작아 이 방식을 택했다.
+        """
+        if self._approach_reference_checked:
+            return
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                BASE_LINK_NAME, END_EFFECTOR_NAME, Time(), timeout=Duration(seconds=0.5)
+            )
+        except (
+            tf2_ros.LookupException,
+            tf2_ros.ConnectivityException,
+            tf2_ros.ExtrapolationException,
+        ):
+            return  # TF를 못 읽으면 다음 복귀 때 다시 시도
+
+        self._approach_reference_checked = True
+        t = tf.transform.translation
+        actual = [t.x, t.y, t.z]
+        error = math.dist(actual, APPROACH_REFERENCE_POINT)
+        if error > APPROACH_REFERENCE_TOLERANCE_M:
+            self.get_logger().warn(
+                f'APPROACH_REFERENCE_POINT가 실제 look pose와 {error * 1000:.0f}mm '
+                f'어긋남 — 상수 {[round(c, 4) for c in APPROACH_REFERENCE_POINT]}, '
+                f'실측 {[round(c, 4) for c in actual]}. '
+                'LOOK_POSE_JOINT_POSITIONS를 바꿨다면 이 상수도 그 순기구학 값으로 '
+                '갱신할 것(접근 고도각 프로파일이 이 점 기준으로 계산됨).'
+            )
+        else:
+            self.get_logger().info(
+                f'APPROACH_REFERENCE_POINT 확인됨(실제 look pose와 {error * 1000:.1f}mm 차이).'
+            )
+
     def _check_return_complete(self) -> None:
         if self._moveit2.query_state() != MoveIt2State.IDLE:
             return
@@ -2205,6 +2307,7 @@ class CoordToGoalNode(Node):
 
         if self._moveit2.motion_suceeded:
             self.get_logger().info('look pose 복귀 완료.')
+            self._verify_approach_reference_point()
         else:
             self.get_logger().warn('look pose 복귀 실패 — 팔 상태 수동 확인 필요.')
 

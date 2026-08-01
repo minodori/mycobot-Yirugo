@@ -55,10 +55,32 @@ camera_info)를 직접 구독해서 픽셀->3D 변환(핀홀 근사, 왜곡 무�
     안 지워질 수 있어 여유를 둠. 픽셀 고정값이 아니라 비율인 이유는 거리가
     멀어져 bbox가 작아져도 상대적 여유가 유지되게 하기 위함).
 
+  - <color_topic> (sensor_msgs/msg/Image, publish_rgb=true일 때만): 컬러
+    이미지(bgr8). 기본값: /camera/camera/color/image_raw. depth가
+    aligned_depth_to_color라 이 컬러 이미지와 픽셀이 1:1로 대응하므로
+    재투영 없이 인덱스 그대로 색을 입힘. 별도 시간 동기화 없이 "가장 최근
+    프레임"을 캐시해서 씀 — 색은 시각화 전용이고 xyz에는 영향이 없어서,
+    카메라 지터(실측 최대 0.3~0.4초, yolo_d435_detector_node 주석 참고)로
+    한두 프레임 어긋나도 무해하기 때문(동기화를 붙이면 그만큼 CPU와 지연이
+    늘어남).
+
+파라미터(이어서):
+  - publish_rgb (기본값 True): 출력 pointcloud에 rgb 필드를 포함할지.
+    occupancy_map_monitor는 x/y/z만 쓰므로 순전히 RViz 육안 확인용이며,
+    포인트당 12바이트 -> 16바이트로 대역폭이 33% 늘어남. RViz에서 이 클라우드를
+    RGB8로 볼 필요가 없으면 false로 꺼서 부하를 줄일 것.
+  - publish_rate_hz (기본값 5.0): 출력 발행 주파수 상한. 0 이하면 제한
+    없음(depth 프레임마다, 보통 30Hz). depth 콜백마다 640x480 전체를 역투영해
+    reliable로 내보내는 비용이 이 노드의 거의 전부라, 이 상한이 곧 이 노드의
+    CPU 사용량을 결정함 — 30Hz로 두면 같은 카메라 스트림을 구독하는
+    yolo_d435_detector_node의 콜백이 밀려서 tomato_detections_image가 끊김
+    (2026-07-31 실물 세션에서 관측). Octomap voxel 갱신은 팔 이동 속도에 비해
+    5Hz면 충분함.
+
 출력:
-  - <output_topic> (sensor_msgs/msg/PointCloud2): x/y/z 필드만 가진 필터링된
-    pointcloud, frame_id는 depth_topic/camera_info_topic과 동일(보통
-    camera_color_optical_frame). 기본값:
+  - <output_topic> (sensor_msgs/msg/PointCloud2): x/y/z(+ publish_rgb면 rgb)
+    필드를 가진 필터링된 pointcloud, frame_id는 depth_topic/camera_info_topic과
+    동일(보통 camera_color_optical_frame). 기본값:
     /camera/camera/depth/color/points_filtered. sensors_3d.yaml의
     point_cloud_topic을 이 토픽으로 바꿔서 occupancy_map_monitor가 raw 대신
     이걸 구독하게 해야 실제로 적용됨.
@@ -75,8 +97,43 @@ from std_msgs.msg import Float32MultiArray
 
 DEFAULT_DEPTH_TOPIC = '/camera/camera/aligned_depth_to_color/image_raw'
 DEFAULT_CAMERA_INFO_TOPIC = '/camera/camera/aligned_depth_to_color/camera_info'
+DEFAULT_COLOR_TOPIC = '/camera/camera/color/image_raw'
 DEFAULT_OUTPUT_TOPIC = '/camera/camera/depth/color/points_filtered'
 DEFAULT_BOXES_TOPIC = 'tomato_boxes'
+
+# [2026-07-31] 출력에 rgb 필드를 넣을지. occupancy_map_monitor는 x/y/z만 읽으므로
+# 순수하게 RViz 육안 확인용임(rgb 필드가 없으면 RViz PointCloud2 디스플레이의
+# Color Transformer에 RGB8 항목 자체가 안 뜸 — 실제로 그 문의를 받아 추가함).
+# 켜면 포인트당 12->16바이트라 대역폭이 33% 늘어남.
+DEFAULT_PUBLISH_RGB = True
+
+# [2026-07-31] 출력 발행 주파수 상한(Hz). 0 이하면 제한 없음(depth 프레임마다 발행).
+# 배경: 이 노드는 depth 콜백마다 640x480 전체를 numpy로 역투영하고 그 결과를
+# reliable QoS로 직렬화해 내보냄 — 30Hz면 rgb 포함 초당 약 147MB(4.9MB x 30)라
+# 이 노드 하나가 CPU를 크게 점유하고, 같은 카메라 스트림을 구독하는
+# yolo_d435_detector_node의 콜백이 밀려서 RViz의 tomato_detections_image가
+# 뚝뚝 끊기는 게 실물 세션에서 관측됨(2026-07-31 사용자 보고). Octomap voxel
+# 갱신은 30Hz가 필요한 작업이 아니라서(팔이 그보다 훨씬 느리게 움직임) 상한을
+# 두는 쪽이 이득이 훨씬 큼. 초과분은 numpy 연산 전에 조기 반환해서 버림.
+DEFAULT_PUBLISH_RATE_HZ = 5.0
+
+# [2026-07-31] rosbag 재생 전용 옵션. `ros2 bag play`는 메시지의 header.stamp를
+# **녹화 당시 값 그대로** 내보내는데, TF는 살아있는 스택이 현재 시각으로 발행한다.
+# 그래서 재생본으로 만든 클라우드는 stamp가 수십 분 과거가 되고, tf2 버퍼(기본
+# 10초)를 벗어나 소비자들이 변환을 못 한다 — RViz PointCloud2가 Error가 되면서
+# Position/Color Transformer가 빈 채로 남고(색 문제로 오해하기 쉽다),
+# occupancy_map_monitor도 octomap을 못 쌓는다. 반면 Image 디스플레이는 TF가
+# 필요 없어서 멀쩡히 보이므로 증상이 더 헷갈린다. 실측: 재생 중 stamp가 현재보다
+# 1789초 과거였다.
+#
+# 정석은 `ros2 bag play --clock` + 모든 노드 use_sim_time이지만, 그러려면
+# move_group과 FakeSystem 컨트롤러까지 전부 sim time으로 재시작해야 한다.
+# 장면이 정지해 있고 팔이 녹화 당시 자세(look pose)에 그대로 있는 재생
+# 시나리오라면 출력 stamp를 현재로 바꾸는 것으로 충분하다.
+#
+# **주의**: 팔이 움직이는 중에 이걸 켜면 안 된다. 옛 장면이 새 TF로 변환되어
+# 엉뚱한 위치에 놓인다(eye-in-hand 제약, docs/ROSBAG_HANDOFF.md 5절).
+DEFAULT_RESTAMP_NOW = False
 
 # YOLO bbox는 물체 경계에 딱 맞게(타이트하게) 잡히는 경우가 많고, depth-color
 # 정렬도 픽셀 단위로 약간의 슬랙이 있을 수 있어서, bbox 그대로만 마스킹하면
@@ -86,13 +143,21 @@ DEFAULT_BOXES_TOPIC = 'tomato_boxes'
 # DEFAULT_BBOX_PADDING_RATIO = 0.2
 DEFAULT_BBOX_PADDING_RATIO = 0.5
 
-# 출력 pointcloud는 occupancy_map_monitor가 필요로 하는 x/y/z만 담음.
-_FIELDS = [
+# occupancy_map_monitor가 필요로 하는 최소 구성(x/y/z).
+_XYZ_FIELDS = [
     PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
     PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
     PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
 ]
-_POINT_STEP = 12
+_XYZ_POINT_STEP = 12
+
+# publish_rgb=true일 때의 구성. rgb는 PCL/RViz 관례대로 "FLOAT32 슬롯에 packed
+# uint32(0x00RRGGBB)의 비트를 그대로 담는" 형태 — 값 자체는 float으로 해석하면
+# 의미가 없고, 소비자(RViz Color Transformer=RGB8)가 다시 비트로 읽음.
+_XYZRGB_FIELDS = _XYZ_FIELDS + [
+    PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
+]
+_XYZRGB_POINT_STEP = 16
 
 
 class PointcloudTomatoFilterNode(Node):
@@ -102,12 +167,19 @@ class PointcloudTomatoFilterNode(Node):
 
         self.declare_parameter('depth_topic', DEFAULT_DEPTH_TOPIC)
         self.declare_parameter('camera_info_topic', DEFAULT_CAMERA_INFO_TOPIC)
+        self.declare_parameter('color_topic', DEFAULT_COLOR_TOPIC)
         self.declare_parameter('output_topic', DEFAULT_OUTPUT_TOPIC)
         self.declare_parameter('boxes_topic', DEFAULT_BOXES_TOPIC)
         self.declare_parameter('bbox_padding_ratio', DEFAULT_BBOX_PADDING_RATIO)
+        self.declare_parameter('publish_rgb', DEFAULT_PUBLISH_RGB)
+        self.declare_parameter('publish_rate_hz', DEFAULT_PUBLISH_RATE_HZ)
+        self.declare_parameter('restamp_now', DEFAULT_RESTAMP_NOW)
 
         depth_topic = (
             self.get_parameter('depth_topic').get_parameter_value().string_value
+        )
+        color_topic = (
+            self.get_parameter('color_topic').get_parameter_value().string_value
         )
         camera_info_topic = (
             self.get_parameter('camera_info_topic')
@@ -125,6 +197,22 @@ class PointcloudTomatoFilterNode(Node):
             .get_parameter_value()
             .double_value
         )
+        self._publish_rgb = (
+            self.get_parameter('publish_rgb').get_parameter_value().bool_value
+        )
+        publish_rate_hz = (
+            self.get_parameter('publish_rate_hz')
+            .get_parameter_value()
+            .double_value
+        )
+        # 발행 간 최소 간격(초). 0이면 제한 없음.
+        self._min_publish_period_s = (
+            1.0 / publish_rate_hz if publish_rate_hz > 0.0 else 0.0
+        )
+        self._last_publish_time = None
+        self._restamp_now = (
+            self.get_parameter('restamp_now').get_parameter_value().bool_value
+        )
 
         self._bridge = CvBridge()
         self._intrinsics = None  # (fx, fy, cx, cy), camera_info 수신 시 채워짐
@@ -135,6 +223,9 @@ class PointcloudTomatoFilterNode(Node):
         self._v_grid = None
         # [(x1, y1, x2, y2), ...], 컬러 이미지 픽셀 좌표.
         self._boxes = []
+        # publish_rgb=true일 때 가장 최근 컬러 프레임(bgr8, HxWx3). depth와
+        # 시간 동기화하지 않고 최신 것을 그대로 씀(모듈 docstring 참고).
+        self._latest_color = None
 
         # occupancy_map_monitor(moveit PointCloudOctomapUpdater)가 RELIABLE로
         # 구독을 요청함(2026-07-24 실물 테스트로 확인 — "incompatible QoS ...
@@ -152,10 +243,26 @@ class PointcloudTomatoFilterNode(Node):
         self._depth_sub = self.create_subscription(
             Image, depth_topic, self._on_depth, 10
         )
+        # rgb를 안 쓸 거면 컬러 이미지 구독 자체를 만들지 않음 — 640x480 bgr8
+        # 프레임을 30Hz로 역직렬화하는 비용이 그대로 들기 때문.
+        self._color_sub = (
+            self.create_subscription(Image, color_topic, self._on_color, 10)
+            if self._publish_rgb
+            else None
+        )
 
         self.get_logger().info(
             f'pointcloud_tomato_filter_node 준비 완료. {depth_topic} -> '
-            f'{output_topic} (bbox 구독: {boxes_topic})'
+            f'{output_topic} (bbox 구독: {boxes_topic}, rgb: '
+            f'{"on, " + color_topic if self._publish_rgb else "off"}, '
+            f'발행 상한: '
+            f'{f"{publish_rate_hz:g}Hz" if self._min_publish_period_s > 0.0 else "없음"}'
+            f'{", restamp_now(재생용)" if self._restamp_now else ""})'
+        )
+
+    def _on_color(self, msg: Image) -> None:
+        self._latest_color = self._bridge.imgmsg_to_cv2(
+            msg, desired_encoding='bgr8'
         )
 
     def _on_camera_info(self, msg: CameraInfo) -> None:
@@ -171,6 +278,20 @@ class PointcloudTomatoFilterNode(Node):
     def _on_depth(self, depth_msg: Image) -> None:
         if self._intrinsics is None:
             return
+
+        # 주파수 상한 초과분은 여기서 버림 — 아래 numpy 역투영/직렬화가 이 노드
+        # 비용의 대부분이라, 반드시 그 앞에서 잘라야 의미가 있음. 벽시계(ROS
+        # clock) 기준이고 depth_msg.header.stamp를 안 쓰는 이유는, 여기서 줄이려는
+        # 게 "센서 시각"이 아니라 "이 프로세스가 실제로 CPU를 쓰는 빈도"이기
+        # 때문(스트림이 밀려 stamp가 뭉쳐 들어와도 실제 처리량은 제한돼야 함).
+        if self._min_publish_period_s > 0.0:
+            now_s = self.get_clock().now().nanoseconds * 1e-9
+            if (
+                self._last_publish_time is not None
+                and now_s - self._last_publish_time < self._min_publish_period_s
+            ):
+                return
+            self._last_publish_time = now_s
 
         depth_image = self._bridge.imgmsg_to_cv2(
             depth_msg, desired_encoding='passthrough'
@@ -206,19 +327,47 @@ class PointcloudTomatoFilterNode(Node):
             ys[row_start:row_end, col_start:col_end] = math.nan
             zs[row_start:row_end, col_start:col_end] = math.nan
 
-        stacked = np.empty((height, width, 3), dtype=np.float32)
+        color = self._latest_color if self._publish_rgb else None
+        # 컬러가 아직 안 왔거나(구동 직후) 해상도가 다르면(런치 인자를 서로
+        # 다르게 준 경우) 색만 포기하고 검은색으로 채움 — 필드 구성을 프레임마다
+        # 바꾸면 RViz/구독자 쪽이 혼란스러워지므로 레이아웃은 항상 고정함.
+        channels = 4 if self._publish_rgb else 3
+        stacked = np.empty((height, width, channels), dtype=np.float32)
         stacked[..., 0] = xs
         stacked[..., 1] = ys
         stacked[..., 2] = zs
 
+        if self._publish_rgb:
+            if color is not None and color.shape[:2] == (height, width):
+                # bgr8 -> 0x00RRGGBB. depth가 aligned_depth_to_color라 컬러
+                # 이미지와 픽셀이 1:1이므로 재투영 없이 인덱스 그대로 대응됨.
+                packed = (
+                    color[..., 2].astype(np.uint32) << 16
+                    | color[..., 1].astype(np.uint32) << 8
+                    | color[..., 0].astype(np.uint32)
+                )
+            else:
+                packed = np.zeros((height, width), dtype=np.uint32)
+            # 비트를 그대로 float32 슬롯에 옮김(값 변환이 아니라 재해석).
+            stacked[..., 3] = packed.view(np.float32)
+
         cloud = PointCloud2()
-        cloud.header = depth_msg.header
+        # header를 통째로 대입하면 입력 메시지의 header 객체를 그대로 참조하게
+        # 되어, 아래에서 stamp를 바꿀 때 남의 메시지를 건드리게 된다. 필드별로 씀.
+        cloud.header.frame_id = depth_msg.header.frame_id
+        cloud.header.stamp = (
+            self.get_clock().now().to_msg()
+            if self._restamp_now
+            else depth_msg.header.stamp
+        )
         cloud.height = height
         cloud.width = width
-        cloud.fields = _FIELDS
+        cloud.fields = _XYZRGB_FIELDS if self._publish_rgb else _XYZ_FIELDS
         cloud.is_bigendian = False
-        cloud.point_step = _POINT_STEP
-        cloud.row_step = _POINT_STEP * width
+        cloud.point_step = (
+            _XYZRGB_POINT_STEP if self._publish_rgb else _XYZ_POINT_STEP
+        )
+        cloud.row_step = cloud.point_step * width
         cloud.is_dense = False
         cloud.data = stacked.tobytes()
 

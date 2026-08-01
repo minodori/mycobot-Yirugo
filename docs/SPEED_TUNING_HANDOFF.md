@@ -72,19 +72,50 @@ write-only 전환한 것이 이 프로젝트에서 가장 큰 개선이었다(�
 
 ## 3. 근본 원인: send_angles 블로킹 (해결됨)
 
-`mycobot280.py`의 `_res()`는 `has_reply=False`인 명령에도 응답을 기다린다:
+> **검증 완료 (2026-07-30)**: RPi에 설치된 pymycobot **4.0.5** 소스를 직접 확인했다.
+> `_async`는 `send_angles`의 **명시적 파라미터**이며 `_mesg`로 전달된다. 공개 API
+> 문서에 안 보이는 것은 언더스코어 접두사(준-비공개) 관례 때문이다.
+>
+> **이전 판의 설명 한 줄은 틀렸었다** — "`has_reply=False`인 명령에도"라고 썼으나,
+> `send_angles`는 실제로 `has_reply=True`를 넘긴다. 블로킹의 진짜 이유는 `_res()`가
+> **`has_reply` 값과 무관하게** 재시도 루프를 돌기 때문이다. 결론(1.5초)은 그대로 맞다.
 
 ```python
-while try_count < 3:
-    self._serial_port.reset_input_buffer()
-    self._write(...)
-    data = self._read(genre)      # wait_time = 0.5s (Linux 기본)
-    if not data or len(data) < 4:
-        try_count += 1; continue   # 응답이 없으므로 3번 모두 소진
+def send_angles(self, angles, speed, _async=False):
+    return self._mesg(ProtocolCode.SEND_ANGLES, angles, speed,
+                      has_reply=True, _async=_async)
+
+def _mesg(self, genre, *args, **kwargs):
+    real_command, has_reply, _async = super()._mesg(genre, *args, **kwargs)
+    if _async:
+        self._write(self._flatten(real_command))
+        return None                                   # write만, 즉시 반환
+    else:
+        return self._res(real_command, has_reply, genre)   # 블로킹 경로
+
+def _res(self, real_command, has_reply, genre):
+    while try_count < 3:                    # has_reply와 무관하게 돎
+        self._serial_port.reset_input_buffer()
+        self._write(...)
+        data = self._read(genre)            # wait_time = 0.5s (Linux 기본)
+        if not data or len(data) < 4:
+            try_count += 1; continue        # 펌웨어 응답이 없어 3번 모두 소진
 ```
 
 `MyCobot280`은 `crc_robot_class`가 아니므로 `wait_time=0.5`가 적용된다 →
 **3 × 0.5 = 1.5초**. 실측 `dt=1.563s`와 일치(나머지 63ms는 write/직렬화).
+
+**`sync_send_angles()`는 대안이 아니다.** 내부에서 `send_angles`를 `_async` 없이
+(=1.5초 블로킹 경로) 호출한 뒤 `is_in_position()`을 0.1초 간격으로 폴링하며 팔이
+도착할 때까지 최대 15초를 **더** 기다린다. 스트리밍 relay와는 정반대 용도다.
+
+```python
+def sync_send_angles(self, degrees, speed, timeout=15):
+    self.send_angles(degrees, speed)        # _async 없음 → 1.5초 블로킹
+    while time.time() - t < timeout:
+        if self.is_in_position(degrees, 0) == 1: break
+        time.sleep(0.1)
+```
 
 | | 의도 | 실제(수정 전) | 수정 후 |
 |---|---|---|---|

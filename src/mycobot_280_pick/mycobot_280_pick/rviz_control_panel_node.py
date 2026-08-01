@@ -2,20 +2,29 @@
 """
 [Tier4, nice-to-have, so101-ros-physical-ai의 rviz_control_panel_node 이식]
 RViz에 인터랙티브 마커(우클릭 메뉴)를 하나 띄워, 매번 `ros2 service call ...`을
-터미널에 치는 대신 마커 메뉴 클릭만으로 다음 세 가지를 호출할 수 있게 함:
+터미널에 치는 대신 마커 메뉴 클릭만으로 다음 여섯 가지를 호출할 수 있게 함:
 
   - "look pose로 이동"       -> /go_to_look_pose (coord_to_goal_node)
   - "수확 시퀀스 시작"        -> /start_harvest_sequence (harvest_sequence_node)
   - "정지(소프트, 궤적 취소)" -> /emergency_stop (coord_to_goal_node)
+  - "서보 릴리즈"            -> /release_servos (RPi sync_plan)
+  - "서보 재포커스"          -> /refocus_servos (RPi sync_plan)
+  - "grasp 확인/실행"        -> /confirm_grasp (coord_to_goal_node,
+    require_grasp_confirmation:=true로 띄웠을 때만 의미 있음 — 대기 중인
+    목표가 없으면 거부됨)
 
-세 서비스 모두 std_srvs/srv/Trigger. 실제 동작/완료 여부는 이 노드가 아니라
-호출받는 노드(coord_to_goal_node/harvest_sequence_node)의 로그로 확인할 것
-— 이 노드는 순수하게 "클릭 -> 서비스 호출"만 담당하는 얇은 UI 계층임.
+여섯 서비스 모두 std_srvs/srv/Trigger. 실제 동작/완료 여부는 이 노드가 아니라
+호출받는 노드(coord_to_goal_node/harvest_sequence_node/RPi sync_plan)의
+로그로 확인할 것 — 이 노드는 순수하게 "클릭 -> 서비스 호출"만 담당하는 얇은
+UI 계층임. sync_plan은 RPi에서 도는 별도 노드지만 같은 ROS_DOMAIN_ID면
+서비스가 그대로 discover되므로 이 노드가 로컬에서 떠도 호출 가능함.
 
 주의(so101 교훈과 동일): "정지" 메뉴는 MoveIt 궤적 실행을 취소하는
 소프트 정지일 뿐, mycobot 280의 실물 서보 토크를 직접 끊는 하드웨어
 e-stop이 아님(coord_to_goal_node._on_emergency_stop_request 독스트링 참고).
-진짜 위급 상황에서는 반드시 실물 전원/RPi 쪽 조치를 우선할 것.
+"서보 릴리즈"가 실제 토크 차단임(sync_plan._on_release_servos 참고, 릴리즈
+중엔 sync_plan이 /joint_states relay를 일시정지함). 진짜 위급 상황에서는
+반드시 실물 전원/RPi 쪽 조치를 우선할 것.
 """
 
 import functools
@@ -35,6 +44,9 @@ PANEL_BOX_SIZE = 0.06
 GO_TO_LOOK_POSE_SERVICE = 'go_to_look_pose'
 START_HARVEST_SERVICE = 'start_harvest_sequence'
 EMERGENCY_STOP_SERVICE = 'emergency_stop'
+RELEASE_SERVOS_SERVICE = 'release_servos'
+REFOCUS_SERVOS_SERVICE = 'refocus_servos'
+CONFIRM_GRASP_SERVICE = 'confirm_grasp'
 
 
 class RvizControlPanelNode(Node):
@@ -45,6 +57,9 @@ class RvizControlPanelNode(Node):
         self._look_pose_client = self.create_client(Trigger, GO_TO_LOOK_POSE_SERVICE)
         self._harvest_client = self.create_client(Trigger, START_HARVEST_SERVICE)
         self._stop_client = self.create_client(Trigger, EMERGENCY_STOP_SERVICE)
+        self._release_client = self.create_client(Trigger, RELEASE_SERVOS_SERVICE)
+        self._refocus_client = self.create_client(Trigger, REFOCUS_SERVOS_SERVICE)
+        self._confirm_grasp_client = self.create_client(Trigger, CONFIRM_GRASP_SERVICE)
 
         self._server = InteractiveMarkerServer(self, 'rviz_control_panel')
         self._menu_handler = MenuHandler()
@@ -56,6 +71,15 @@ class RvizControlPanelNode(Node):
         )
         self._menu_handler.insert(
             '정지(소프트, 궤적 취소)', callback=self._on_stop_menu
+        )
+        self._menu_handler.insert(
+            '서보 릴리즈', callback=self._on_release_menu
+        )
+        self._menu_handler.insert(
+            '서보 재포커스', callback=self._on_refocus_menu
+        )
+        self._menu_handler.insert(
+            'grasp 확인/실행', callback=self._on_confirm_grasp_menu
         )
 
         self._create_panel_marker()
@@ -138,6 +162,21 @@ class RvizControlPanelNode(Node):
     def _on_stop_menu(self, feedback) -> None:
         self._call_trigger_service(
             self._stop_client, EMERGENCY_STOP_SERVICE, '정지(소프트, 궤적 취소)'
+        )
+
+    def _on_release_menu(self, feedback) -> None:
+        self._call_trigger_service(
+            self._release_client, RELEASE_SERVOS_SERVICE, '서보 릴리즈'
+        )
+
+    def _on_refocus_menu(self, feedback) -> None:
+        self._call_trigger_service(
+            self._refocus_client, REFOCUS_SERVOS_SERVICE, '서보 재포커스'
+        )
+
+    def _on_confirm_grasp_menu(self, feedback) -> None:
+        self._call_trigger_service(
+            self._confirm_grasp_client, CONFIRM_GRASP_SERVICE, 'grasp 확인/실행'
         )
 
 

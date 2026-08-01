@@ -107,6 +107,22 @@ ros2 launch mycobot_280_moveit2 demo_octomap.launch.py
 RobotModel/Octomap이 정상 표시되면 준비 완료(RViz는 이 launch에 이미
 포함됨, 별도 실행 불필요).
 
+**[2026-07-27] harvest 파이프라인 먼저 검증할 때**: 그리퍼 근접거리
+self-filter 잔여 voxel로 인한 간헐적 `START_STATE_IN_COLLISION`(`docs/
+obstacle_avoidance_manual_test.md` "알려진 문제" 참고, 아직 미해결인 별도
+로드맵 항목)이 계속 막으면, Octomap 장애물 회피 파이프라인 자체를 건너뛰고
+검출->좌표계산->파지 경로만 먼저 끝까지 확인할 수 있음:
+
+```bash
+ros2 launch mycobot_280_moveit2 demo_octomap.launch.py enable_octomap:=false
+```
+
+D435/handeye 발행은 그대로 유지되므로 YOLO 검출/좌표 변환은 정상 동작함 —
+단 이 모드에서는 MoveIt이 실제 장애물을 전혀 못 보므로(Octomap 자체가 없음)
+팔 주변 안전을 사람이 직접 확인할 것. 장애물 회피(Octomap) 자체의 검증은
+이 로드맵 항목이 별도로 해결된 뒤 다시 `enable_octomap:=true`(기본값)로
+진행할 것.
+
 ## 5. RPi에서 `sync_plan` 시작 (실물이 시뮬레이션을 따라 움직이기 시작함)
 
 시뮬레이션이 3번에서 맞춘 look pose 그대로인지 RViz로 다시 한번 확인한 뒤:
@@ -186,6 +202,10 @@ ros2 topic pub --once /target_point geometry_msgs/msg/PointStamped \
 ```bash
 # 4번 단계에서 띄운 demo_octomap.launch.py / coord_to_goal_node를 정리한 뒤
 ros2 launch mycobot_280_pick pick_pipeline.launch.py
+
+# harvest 파이프라인만 먼저 볼 때(4번 단계 "harvest 파이프라인 먼저 검증할
+# 때" 참고, Octomap 장애물 회피는 건너뜀 — 팔 주변 안전 직접 확인할 것):
+ros2 launch mycobot_280_pick pick_pipeline.launch.py enable_octomap:=false
 ```
 
 **확인 순서**:
@@ -300,11 +320,14 @@ pkill -9 -f "move_group|rviz2|realsense2_camera_node|ros2_control_node|robot_sta
 
 ### 남은 과제
 
-1. **실제 그리퍼 파지(actuation)** — 가장 큰 공백. 지금은 오프셋 위치로
-   접근하는 것으로만 대체하고 있고, 실제로 쥐고 따는 동작 자체가 없음.
-   구현 시 so101 교훈(그리퍼 열기를 명시적 첫 단계로 넣을 것 —
-   `docs/obstacle_avoidance_manual_test.md` "[Tier5]" 절 참고)을 반드시
-   반영할 것.
+1. **실제 그리퍼 파지(actuation)** — **2026-07-27 착수함**(`docs/
+   obstacle_avoidance_manual_test.md` "그리퍼 actuation 1단계" 절 참고).
+   정렬→**그리퍼 열기**→직진 접근→**파지**→후퇴 5단계로 재구성 완료,
+   so101 교훈(그리퍼 열기 명시적 단계) 반영함. **정렬/그리퍼 열기는 mock
+   검증 완료, 그리퍼 마운트 180도 방향 버그도 발견+수정(실물 확인 완료)**.
+   ⚠️ **"직진 접근"(목표 지점까지 실제로 8cm 더 들어가는 단계)이 여러
+   좌표에서 재현되는 IK/OMPL reachability 문제로 막혀있음 — 다음 세션
+   최우선**(위 문서 절에 원인 가설/시도한 것들/다음 시도 방향 상세 기록).
 2. **파지 성공 여부 판정** — 그리퍼가 없으니 당연히 없음. 나중엔 "MoveIt
    실행 성공 ≠ 실제 파지 성공"(so101이 겪은 문제) 구분법도 필요.
 3. **후퇴 궤적 직선성** — 관절공간 플랜이라 잡고 위로 솟았다 내려오는
@@ -320,3 +343,10 @@ pkill -9 -f "move_group|rviz2|realsense2_camera_node|ros2_control_node|robot_sta
 6. **automato_ws로 포팅** — 문서에 명시된 최종 목표(`docs/
    obstacle_avoidance_manual_test.md` "이후 원래 로드맵... 완성되면
    automato_ws로 포팅" 참고)인데 아직 시작 전.
+7. **그리퍼 근접거리 self-filter 재평가(Octomap 장애물 회피)** — 로드맵
+   우선순위 2번, 아직 미착수. `sensors_3d.yaml`의 `padding_scale: 0.92`
+   타협에서 나오는 잔여 voxel이 간헐적으로 `START_STATE_IN_COLLISION`을
+   유발함(위 4/8번 단계 `enable_octomap:=false`로 우회 가능하게 해둠,
+   2026-07-27). **harvest(검출→좌표계산→파지) 검증은 이 이슈 해결과
+   무관하게 우회 모드로 먼저 끝까지 진행 가능** — 실제 장애물 회피 자체는
+   이 항목을 별도로 해결한 뒤 `enable_octomap:=true`(기본값)로 재검증할 것.

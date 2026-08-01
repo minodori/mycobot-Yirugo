@@ -33,6 +33,12 @@ import pymycobot
 from packaging import version
 
 # min low version require
+# [2026-07-30] 실제 검증 버전은 **4.0.5**(RPi에 설치된 것). 이 relay가 의존하는
+# `send_angles(..., _async=True)`의 write-only 분기를 그 버전 소스에서 직접 확인함
+# (`_mesg`의 `if _async: self._write(...); return None`). 이 값 3.6.1은 벤더 템플릿
+# 그대로이고 하한일 뿐이라, 업그레이드 시 자동으로 걸러주지 못한다 —
+# 라이브러리를 올린 뒤 팔이 "구간 단위로 뚝뚝 끊기면" 그 분기가 사라졌는지
+# 먼저 확인할 것(아래 send_angles 호출부 주석 참고).
 MIN_REQUIRE_VERSION = '3.6.1'
 
 current_verison = pymycobot.__version__
@@ -117,6 +123,13 @@ THROTTLE_PERIOD_SEC = 0.05 #0.2 #0.05  # 최대 20Hz로 send_angles 호출을 �
 # 0보다 큰 값이면 어떤 값이든 억제된다.
 # 앞으로 이보다 더 낮은 스케일을 쓰려면 이 값도 함께 낮출 것.
 ANGLE_EPSILON_DEG = 0.1     # 이 이하 변화는 노이즈로 보고 재전송 생략
+
+# [2026-07-31] 기동 시 실물 관절각과 /joint_states의 허용 차이(도).
+# 이보다 크면 첫 전송을 막고 start_relay 호출을 기다린다(_verify_startup_sync).
+# 5도로 잡은 근거: look pose 복귀 직후 실측 정지 오차가 0.05도 수준이고,
+# yolo_d435_detector_node의 LOOK_POSE_TOLERANCE_RAD(0.08rad ≈ 4.6도)가 이미
+# "같은 자세로 볼 수 있는 범위"로 쓰이고 있어 그와 눈금을 맞춤.
+STARTUP_SYNC_TOLERANCE_DEG = 5.0
 
 # [2026-07-30, TASK A — 서보 speed 동적 계산] docs/SPEED_TUNING_HANDOFF.md 참고.
 #
@@ -292,8 +305,17 @@ class Slider_Subscriber(Node):
         # [2026-07-30] 마지막으로 실물에 보낸 speed — SPEED_HYSTERESIS 판정용.
         self._last_sent_speed = None
 
+        # [2026-07-31] 기동 시 안전 검사 상태 — 아래 _verify_startup_sync 참고.
+        # 첫 /joint_states를 실물로 보내기 전에 실제 관절각과 대조하며, 크게
+        # 어긋나 있으면 전송을 막고 start_relay 호출을 기다린다.
+        self._startup_verified = False
+        self._startup_block_logged = False
+        # 관절 누락 경고를 매 프레임 찍지 않기 위한 플래그(100Hz라 금방 도배됨).
+        self._missing_joint_logged = False
+
         self.create_service(Trigger, 'release_servos', self._on_release_servos)
         self.create_service(Trigger, 'refocus_servos', self._on_refocus_servos)
+        self.create_service(Trigger, 'start_relay', self._on_start_relay)
 
         # [2026-07-28, 그리퍼 단계 LED 표시] coord_to_goal_node가 5단계 중
         # 현재 단계를 발행하면 그에 맞춰 상단 RGB LED 색을 바꿈(set_color).
@@ -339,6 +361,97 @@ class Slider_Subscriber(Node):
         self._blink_on = not self._blink_on
         r, g, b = color if self._blink_on else (0, 0, 0)
         self._set_color_async(r, g, b)
+
+    def _verify_startup_sync(self, data_list):
+        """첫 전송 직전, 실물 관절각이 /joint_states와 맞는지 확인.
+
+        [2026-07-31] 이 relay는 /joint_states를 받는 즉시 아무 검사 없이
+        send_angles로 중계한다. 그래서 **relay를 켜는 행위 자체가 이동
+        명령**이 된다 — 시뮬레이션이 이미 어떤 자세를 들고 있으면(예:
+        initial_positions.yaml의 look pose) 실물이 어디에 있든 그리로
+        휩쓸려 간다. 경로도 사람이 고른 게 아니라 서보가 알아서 잡는다.
+
+        `refocus_servos` 응답 메시지가 이미 같은 위험을 경고하고 있었지만
+        (손으로 옮긴 뒤 재개할 때), 정작 **기동 시점**에는 아무 검사가
+        없었다. 실제로 "sync_plan을 실행하면 팔이 제멋대로 움직인다"는
+        보고가 있었고, 그 건의 직접 원인은 시리얼 이중 점유였지만 이
+        구멍은 그와 별개로 남아 있었다.
+
+        차이가 STARTUP_SYNC_TOLERANCE_DEG 이내면 정상 중계를 시작하고,
+        크면 전송하지 않고 start_relay 호출을 기다린다. get_angles()를
+        못 읽으면(통신 실패) 판단 근거가 없으므로 보수적으로 막는다.
+
+        Returns: True면 전송해도 됨.
+        """
+        if self._startup_verified:
+            return True
+
+        try:
+            actual = self.mc.get_angles()
+        except Exception as exc:  # noqa: BLE001 - 통신 실패는 아래서 막는 것으로 처리
+            actual = None
+            self.get_logger().warn('get_angles() 예외: {}'.format(exc))
+
+        # pymycobot은 통신 실패 시 리스트가 아니라 **-1**을 반환한다(_res의
+        # 실패 반환값). -1은 truthy라 `not actual`로 걸러지지 않고 len(-1)에서
+        # TypeError가 나므로 타입부터 확인해야 한다(스텁 테스트로 재현 확인).
+        if not isinstance(actual, (list, tuple)) or len(actual) != len(data_list):
+            if not self._startup_block_logged:
+                self._startup_block_logged = True
+                self.get_logger().error(
+                    '기동 안전 검사: 실물 관절각을 읽지 못해(get_angles -> {}) '
+                    '중계를 시작하지 않음. 실물 연결을 확인한 뒤 start_relay '
+                    '서비스를 호출하면 검사를 건너뛰고 시작함.'.format(actual)
+                )
+            return False
+
+        diffs = [abs(a - b) for a, b in zip(actual, data_list)]
+        worst = max(diffs)
+        if worst <= STARTUP_SYNC_TOLERANCE_DEG:
+            self._startup_verified = True
+            self.get_logger().info(
+                '기동 안전 검사 통과 — 실물과 /joint_states 최대 차이 '
+                '{:.2f}도(허용 {}도). 중계 시작.'.format(
+                    worst, STARTUP_SYNC_TOLERANCE_DEG
+                )
+            )
+            return True
+
+        if not self._startup_block_logged:
+            self._startup_block_logged = True
+            self.get_logger().error(
+                '기동 안전 검사 실패 — 실물과 /joint_states가 최대 {:.1f}도 '
+                '차이남(허용 {}도). 지금 중계를 시작하면 팔이 그만큼 갑자기 '
+                '움직이므로 전송을 막았음.\n'
+                '  실물   : {}\n'
+                '  시뮬   : {}\n'
+                '  관절별 : {}\n'
+                '해결: (a) 로컬 시뮬레이션을 실물 자세에 맞추거나, '
+                '(b) 실물을 시뮬 자세로 손으로 옮긴 뒤, '
+                'start_relay 서비스를 호출할 것 — '
+                'ros2 service call /start_relay std_srvs/srv/Trigger'.format(
+                    worst, STARTUP_SYNC_TOLERANCE_DEG,
+                    [round(v, 2) for v in actual],
+                    [round(v, 2) for v in data_list],
+                    [round(v, 2) for v in diffs],
+                )
+            )
+        return False
+
+    def _on_start_relay(self, request, response):
+        """기동 안전 검사를 건너뛰고 중계를 시작함(_verify_startup_sync 참고).
+
+        ⚠️ 호출 즉시 다음 /joint_states부터 실물이 그 자세로 이동한다.
+        실물과 시뮬이 얼마나 벌어져 있는지 위 에러 로그로 확인한 뒤 부를 것.
+        """
+        self._startup_verified = True
+        response.success = True
+        response.message = (
+            '기동 안전 검사를 건너뛰고 중계를 시작함 — 다음 /joint_states '
+            '수신 즉시 실물이 시뮬 자세로 이동함.'
+        )
+        self.get_logger().warn(response.message)
+        return response
 
     def _on_release_servos(self, request, response):
         self._released = True
@@ -434,14 +547,28 @@ class Slider_Subscriber(Node):
         joint_state_dict = {name: msg.position[i] for i, name in enumerate(msg.name)}
         # 根据 RViz 顺序重新排列关节角度
         data_list = []
+        # [2026-07-31] 관절 누락 가드. 예전에는 `if joint in joint_state_dict:`만
+        # 있고 else가 없어서, /joint_states에 관절이 하나라도 빠져 오면 data_list가
+        # **조용히 짧아진 채로** send_angles에 넘어갔다. 6개를 기대하는 프로토콜에
+        # 5개를 주면 무슨 일이 벌어질지 보장되지 않고, 로그에도 아무 흔적이 남지
+        # 않는다. 기형 리스트는 절대 실물로 내보내지 않는다.
+        missing = [j for j in self.rviz_order if j not in joint_state_dict]
+        if missing:
+            if not self._missing_joint_logged:
+                self._missing_joint_logged = True
+                self.get_logger().error(
+                    '/joint_states에 관절 누락 {} — 이 메시지 무시함(기형 명령 '
+                    '전송 방지). 수신한 관절: {}'.format(missing, list(joint_state_dict))
+                )
+            return
+
         for joint in self.rviz_order:
             # 获取弧度并转为角度
-            if joint in joint_state_dict:
-                radians_to_angles = round(math.degrees(joint_state_dict[joint]), 3)
-                if joint == 'joint6output_to_joint6':
-                    # 2026-07-24: 실물 서보 J6 회전 방향이 URDF 기준과 반대로 확인되어 부호 반전
-                    radians_to_angles = -radians_to_angles
-                data_list.append(radians_to_angles)
+            radians_to_angles = round(math.degrees(joint_state_dict[joint]), 3)
+            if joint == 'joint6output_to_joint6':
+                # 2026-07-24: 실물 서보 J6 회전 방향이 URDF 기준과 반대로 확인되어 부호 반전
+                radians_to_angles = -radians_to_angles
+            data_list.append(radians_to_angles)
 
         # [2026-07-29] 직전 전송값과 거의 같으면(정지 상태) 재전송 생략 —
         # 불필요한 재가감속 재계산을 줄임.
@@ -453,28 +580,65 @@ class Slider_Subscriber(Node):
                 for a, b in zip(data_list, self._last_sent_angles)
             )
         )
+        # [2026-07-31] 첫 전송 직전 안전 검사 — 실물이 /joint_states와 크게
+        # 어긋나 있으면 여기서 막는다(_verify_startup_sync 참고). should_send
+        # 판정 뒤에 두는 이유는, 어차피 보낼 게 없는 프레임에서까지 get_angles()
+        # 동기 호출을 하지 않기 위함.
+        if should_send and not self._verify_startup_sync(data_list):
+            return
+
         if should_send:
             # [2026-07-30, TASK A] speed를 하드코딩(예전 40)하지 않고 실제
             # 각속도에서 역산 — PC 쪽 구간별 VELOCITY_SCALING이 무엇이든
             # 서보 추종 속도가 자동으로 따라옴.
             speed, delta_max, elapsed = self._servo_speed_for(data_list, now)
-            # [2026-07-30, _async=True — relay 병목 근본 해결] pymycobot 소스
-            # (mycobot280.py `_res`, common.py `read`) 실측 분석 결과:
+            # [2026-07-30, _async=True — relay 병목 근본 해결]
+            # [2026-07-30 정정] 설치된 pymycobot 소스를 RPi에서 직접 확인함
+            # (버전 4.0.5, ~/.local/lib/python3.12/site-packages/pymycobot/).
+            # 아래가 실제 소스 기준 설명이며, 이전 주석의 "send_angles()는
+            # has_reply=True를 주지 않아" 부분은 **틀렸었다** — 정반대로
+            # 명시적으로 넘긴다. 다만 결론(1.5초 블로킹)은 그대로 맞다.
             #
-            # send_angles()는 has_reply=True를 주지 않아 펌웨어가 응답을 보내지
-            # 않는데, 기본 경로(_async=False)의 `_res()`는 그걸 모르고
-            #   while try_count < 3:  write() → read()  # wait_time=0.5s
-            # 로 0.5초씩 3번 기다린 뒤 포기한다(MyCobot280은 crc_robot_class가
-            # 아니라 Linux 기본 wait_time=0.5가 적용됨). 즉 호출 1회가 1.5초간
-            # 블로킹되어, THROTTLE_PERIOD_SEC=0.05(20Hz)를 무의미하게 만들고
-            # 실효 relay 주기를 0.64Hz로 떨어뜨렸다 — 로그 실측 dt=1.563s가
-            # 3×0.5s와 일치(나머지 63ms는 write/직렬화 오버헤드).
-            # 그 결과 명령당 이동량이 의도한 0.9°가 아니라 28°가 되어, 서보가
-            # 28° 움직인 뒤 1.5초를 쉬는 것이 "구간 단위로 뚝뚝 끊김"의 정체였음.
+            #   def send_angles(self, angles, speed, _async=False):
+            #       return self._mesg(ProtocolCode.SEND_ANGLES, angles, speed,
+            #                         has_reply=True, _async=_async)
             #
-            # _async=True는 `_mesg`의 async 분기를 타서 write만 하고 즉시
+            #   def _mesg(self, genre, *args, **kwargs):
+            #       real_command, has_reply, _async = super()._mesg(...)
+            #       if _async:
+            #           self._write(self._flatten(real_command)); return None
+            #       else:
+            #           return self._res(real_command, has_reply, genre)
+            #
+            #   def _res(self, real_command, has_reply, genre):
+            #       while try_count < 3:              # has_reply와 무관하게 돎
+            #           self._serial_port.reset_input_buffer()
+            #           self._write(...); data = self._read(genre)  # 0.5s 대기
+            #           if not data or len(data) < 4: try_count += 1; continue
+            #
+            # 즉 블로킹의 원인은 `_res`가 has_reply 값과 상관없이 3회 재시도
+            # 루프를 돌기 때문이고, 펌웨어가 SEND_ANGLES에 응답하지 않으므로
+            # 3회가 전부 타임아웃된다(MyCobot280은 crc_robot_class가 아니라
+            # Linux 기본 wait_time=0.5 적용). 호출 1회가 3×0.5=1.5초 블로킹되어
+            # THROTTLE_PERIOD_SEC=0.05(20Hz)를 무의미하게 만들고 실효 relay
+            # 주기를 0.64Hz로 떨어뜨렸다 — 로그 실측 dt=1.563s가 이와 일치
+            # (나머지 63ms는 write/직렬화 오버헤드). 그 결과 명령당 이동량이
+            # 의도한 0.9°가 아니라 28°가 되어, 서보가 28° 움직인 뒤 1.5초를
+            # 쉬는 것이 "구간 단위로 뚝뚝 끊김"의 정체였음.
+            #
+            # _async=True는 위 `_mesg`의 async 분기를 타서 write만 하고 즉시
             # 반환한다(읽기·재시도 없음). 20Hz 스트리밍 relay에는 이쪽이 맞음 —
             # 애초에 받을 응답이 없으므로 잃는 정보도 없다.
+            #
+            # `sync_send_angles()`는 대안이 **아니다** — 내부에서 send_angles를
+            # _async 없이(=1.5초 블로킹 경로) 호출한 뒤 is_in_position()을
+            # 0.1초 간격으로 폴링하며 팔이 도착할 때까지 최대 15초를 더 기다린다.
+            # 스트리밍 relay와는 정반대 용도(단발 이동 후 도착 확인)다.
+            #
+            # `_async`가 공개 API 문서에 안 보이는 것은 언더스코어 접두사
+            # (준-비공개) 관례 때문이며, 시그니처에는 명시적으로 존재한다.
+            # 라이브러리 업그레이드 시 이 분기가 유지되는지 확인할 것 —
+            # 사라지면 조용히 1.5초 블로킹이 돌아온다.
             #
             # 주의: async 경로는 `_res`가 매 호출 하던 reset_input_buffer()를
             # 건너뛴다. send_angles는 응답이 없어 정상적으로는 입력 버퍼에

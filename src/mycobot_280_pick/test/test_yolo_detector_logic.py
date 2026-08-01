@@ -21,8 +21,8 @@ from mycobot_280_pick.yolo_d435_detector_node import (
 
 def test_cluster_merges_nearby_same_class_detections():
     detections = [
-        (0, 0.100, 0.050, 0.300, 0.6),
-        (0, 0.102, 0.048, 0.302, 0.9),
+        (0, 0.100, 0.050, 0.300, 0.6, 0.016),
+        (0, 0.102, 0.048, 0.302, 0.9, 0.018),
     ]
     clusters = _cluster_detections(detections)
 
@@ -30,13 +30,14 @@ def test_cluster_merges_nearby_same_class_detections():
     assert clusters[0]['count'] == 2
     assert clusters[0]['x'] == (0.100 + 0.102) / 2
     assert clusters[0]['confidence'] == (0.6 + 0.9) / 2
+    assert clusters[0]['radius_m'] == (0.016 + 0.018) / 2
 
 
 def test_cluster_keeps_far_apart_same_class_separate():
     far_offset = CLUSTER_DISTANCE_M * 5
     detections = [
-        (0, 0.100, 0.050, 0.300, 0.8),
-        (0, 0.100 + far_offset, 0.050, 0.300, 0.8),
+        (0, 0.100, 0.050, 0.300, 0.8, 0.017),
+        (0, 0.100 + far_offset, 0.050, 0.300, 0.8, 0.017),
     ]
     clusters = _cluster_detections(detections)
 
@@ -46,8 +47,8 @@ def test_cluster_keeps_far_apart_same_class_separate():
 
 def test_cluster_keeps_different_class_separate_even_at_same_position():
     detections = [
-        (0, 0.100, 0.050, 0.300, 0.8),
-        (3, 0.100, 0.050, 0.300, 0.8),
+        (0, 0.100, 0.050, 0.300, 0.8, 0.017),
+        (3, 0.100, 0.050, 0.300, 0.8, 0.017),
     ]
     clusters = _cluster_detections(detections)
 
@@ -60,16 +61,17 @@ def test_cluster_selection_prefers_observation_count_over_single_high_confidence
     횟수가 더 많은(안정적인) 클러스터를 우선 채택."""
     detections = [
         # 클러스터 A: 1회만 관측, confidence는 높음
-        (0, 0.300, 0.000, 0.300, 0.95),
+        (0, 0.300, 0.000, 0.300, 0.95, 0.017),
         # 클러스터 B: 2회 관측(멀리 떨어짐), 평균 confidence는 A보다 낮음
-        (0, 0.000, 0.300, 0.300, 0.55),
-        (0, 0.002, 0.302, 0.302, 0.65),
+        (0, 0.000, 0.300, 0.300, 0.55, 0.015),
+        (0, 0.002, 0.302, 0.302, 0.65, 0.019),
     ]
     clusters = _cluster_detections(detections)
     best = sorted(clusters, key=lambda c: (c['count'], c['confidence']), reverse=True)[0]
 
     assert best['count'] == 2
     assert best['confidence'] == (0.55 + 0.65) / 2
+    assert best['radius_m'] == (0.015 + 0.019) / 2
 
 
 def test_estimate_radius_within_clamp_range():

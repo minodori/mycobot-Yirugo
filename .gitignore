@@ -17,3 +17,9 @@ __pycache__/
 frames_*.gv
 frames_*.pdf
 *.log
+
+# rosbag — 용량이 크다(장면 bag 143MB/30초, 스윕 bag 240MB). 다만 검출 결과
+# JSON/CSV는 오프라인 스윕의 입력이라 저장소에 남긴다(수 KB).
+bags/*
+!bags/*.json
+!bags/*.csv
