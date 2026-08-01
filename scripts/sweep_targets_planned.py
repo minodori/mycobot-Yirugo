@@ -235,7 +235,7 @@ class PlanProbe(Node):
         state.is_diff = False
         return state
 
-    def plan_to(self, position, quat):
+    def plan_to(self, position, quat, box_xyz=None, yaw_free=False):
         req = MotionPlanRequest()
         req.group_name = N.GROUP_NAME
         req.num_planning_attempts = self._attempts
@@ -256,15 +256,24 @@ class PlanProbe(Node):
         (pose.pose.orientation.x, pose.pose.orientation.y,
          pose.pose.orientation.z, pose.pose.orientation.w) = quat
 
+        # [2026-08-01] 목표가 "점"이 아닐 수 있다. 수확통에 떨어뜨릴 때는
+        # 통 넓이(8x8cm) 안 어디든 되고, 그리퍼가 아래를 보기만 하면 수직축
+        # 둘레 회전(yaw)은 완전히 자유다. 그 자유도를 제약에 반영하면 플래너가
+        # 훨씬 싼 해를 고를 수 있다 — box_xyz는 위치 상자, yaw_free는 그리퍼
+        # 정면축(로컬 +Z) 둘레를 풀어준다.
         pc = PositionConstraint()
         pc.header = pose.header
         pc.link_name = N.END_EFFECTOR_NAME
         pc.weight = 1.0
-        sphere = SolidPrimitive()
-        sphere.type = SolidPrimitive.SPHERE
-        sphere.dimensions = [POSITION_TOLERANCE_M]
+        shape = SolidPrimitive()
+        if box_xyz:
+            shape.type = SolidPrimitive.BOX
+            shape.dimensions = list(box_xyz)
+        else:
+            shape.type = SolidPrimitive.SPHERE
+            shape.dimensions = [POSITION_TOLERANCE_M]
         volume = BoundingVolume()
-        volume.primitives = [sphere]
+        volume.primitives = [shape]
         volume.primitive_poses = [pose.pose]
         pc.constraint_region = volume
 
@@ -274,7 +283,9 @@ class PlanProbe(Node):
         oc.orientation = pose.pose.orientation
         oc.absolute_x_axis_tolerance = ORIENTATION_TOLERANCE_RAD
         oc.absolute_y_axis_tolerance = ORIENTATION_TOLERANCE_RAD
-        oc.absolute_z_axis_tolerance = ORIENTATION_TOLERANCE_RAD
+        # 그리퍼 로컬 +Z가 정면(coord_to_goal_node _compute_look_at_quat_xyzw)이므로
+        # 그 축 둘레가 곧 "정면 방향을 유지한 채 도는" 자유도다.
+        oc.absolute_z_axis_tolerance = math.pi if yaw_free else ORIENTATION_TOLERANCE_RAD
         oc.weight = 1.0
 
         goal = Constraints()
