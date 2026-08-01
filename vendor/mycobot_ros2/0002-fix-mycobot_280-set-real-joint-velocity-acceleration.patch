@@ -1,0 +1,110 @@
+From 500fc841b57a9956d3c576cbca92141bd239216b Mon Sep 17 00:00:00 2001
+From: minodori <minodori@gmail.com>
+Date: Thu, 16 Jul 2026 00:10:27 +0900
+Subject: [PATCH 2/3] fix(mycobot_280): set real joint velocity/acceleration
+ limits, make servo release optional in follow_display
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+joint_limits.yaml had all limits disabled (max_velocity/acceleration: 0),
+which broke MoveIt2's time-parameterization; set explicit values per joint.
+
+follow_display now accepts a release_servos parameter (default true) so it
+can be used for read-only joint-state monitoring without releasing servos
+(useful outside hand-eye calibration, where free-hand posing is needed).
+NOTE: this file runs on the RPi/SBC — the equivalent change still needs to
+be applied there for it to take effect on the real robot.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../config/joint_limits.yaml                  | 48 +++++++++----------
+ .../mycobot_280jn/follow_display.py           |  7 ++-
+ 2 files changed, 30 insertions(+), 25 deletions(-)
+
+diff --git a/mycobot_280/mycobot_280_moveit2/config/joint_limits.yaml b/mycobot_280/mycobot_280_moveit2/config/joint_limits.yaml
+index 964c16b..99555f1 100644
+--- a/mycobot_280/mycobot_280_moveit2/config/joint_limits.yaml
++++ b/mycobot_280/mycobot_280_moveit2/config/joint_limits.yaml
+@@ -9,32 +9,32 @@ default_acceleration_scaling_factor: 0.1
+ # Joint limits can be turned off with [has_velocity_limits, has_acceleration_limits]
+ joint_limits:
+   joint2_to_joint1:
+-    has_velocity_limits: false
+-    max_velocity: 0
+-    has_acceleration_limits: false
+-    max_acceleration: 0
++    has_velocity_limits: true
++    max_velocity: 1.57
++    has_acceleration_limits: true
++    max_acceleration: 2.0
+   joint3_to_joint2:
+-    has_velocity_limits: false
+-    max_velocity: 0
+-    has_acceleration_limits: false
+-    max_acceleration: 0
++    has_velocity_limits: true
++    max_velocity: 1.57
++    has_acceleration_limits: true
++    max_acceleration: 2.0
+   joint4_to_joint3:
+-    has_velocity_limits: false
+-    max_velocity: 0
+-    has_acceleration_limits: false
+-    max_acceleration: 0
++    has_velocity_limits: true
++    max_velocity: 1.57
++    has_acceleration_limits: true
++    max_acceleration: 2.0
+   joint5_to_joint4:
+-    has_velocity_limits: false
+-    max_velocity: 0
+-    has_acceleration_limits: false
+-    max_acceleration: 0
++    has_velocity_limits: true
++    max_velocity: 1.57
++    has_acceleration_limits: true
++    max_acceleration: 2.0
+   joint6_to_joint5:
+-    has_velocity_limits: false
+-    max_velocity: 0
+-    has_acceleration_limits: false
+-    max_acceleration: 0
++    has_velocity_limits: true
++    max_velocity: 1.57
++    has_acceleration_limits: true
++    max_acceleration: 2.0
+   joint6output_to_joint6:
+-    has_velocity_limits: false
+-    max_velocity: 0
+-    has_acceleration_limits: false
+-    max_acceleration: 0
+\ No newline at end of file
++    has_velocity_limits: true
++    max_velocity: 1.57
++    has_acceleration_limits: true
++    max_acceleration: 2.0
+diff --git a/mycobot_280/mycobot_280jn/mycobot_280jn/follow_display.py b/mycobot_280/mycobot_280jn/mycobot_280jn/follow_display.py
+index 2a65dc6..a8e0326 100644
+--- a/mycobot_280/mycobot_280jn/mycobot_280jn/follow_display.py
++++ b/mycobot_280/mycobot_280jn/mycobot_280jn/follow_display.py
+@@ -25,13 +25,18 @@ class Talker(Node):
+         super().__init__("follow_display")
+         self.declare_parameter('port', '/dev/ttyTHS1')
+         self.declare_parameter('baud', 1000000)
++        # 핸드-아이 캘리브레이션처럼 손으로 자세를 잡아야 하는 경우에만 필요한
++        # 동작이라 기본값은 유지 (release_servos:=false로 끄면 현재 관절 유지)
++        self.declare_parameter('release_servos', True)
+ 
+         port = self.get_parameter("port").get_parameter_value().string_value
+         baud = self.get_parameter("baud").get_parameter_value().integer_value
++        release_servos = self.get_parameter("release_servos").get_parameter_value().bool_value
+ 
+         self.get_logger().info("port:%s, baud:%d" % (port, baud))
+         self.mc = MyCobot280(port, str(baud))
+-        self.mc.release_all_servos()
++        if release_servos:
++            self.mc.release_all_servos()
+ 
+     def start(self):
+         pub = self.create_publisher(

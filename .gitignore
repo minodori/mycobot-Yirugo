@@ -4,6 +4,14 @@ install/
 log/
 
 # nested git repos (each has its own history, tracked separately)
+#
+# ⚠️ src/mycobot_ros2 에는 이 프로젝트 필수 설정이 들어 있는데(그리퍼 콜리전
+# mesh scale, 마운트 rpy, SRDF look_pose, sensors_3d, ompl_planning, 런치 인자
+# 등) 여기서 제외되므로 **다른 장비에서 clone하면 동작하지 않는다.**
+# 자체 .git을 가진 중첩 저장소(1.4GB)라 gitignore 예외로도 통째 편입으로도
+# 해결이 안 된다. 그래서 vendor/mycobot_ros2/*.patch 로 떠 두고
+# scripts/apply_vendor_patch.sh 로 복원한다.
+# **설정을 고칠 때마다 `./scripts/apply_vendor_patch.sh --regenerate` 를 돌릴 것.**
 src/mycobot_ros2/
 src/easy_handeye2/
 src/pymoveit2/
