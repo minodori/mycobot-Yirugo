@@ -122,6 +122,36 @@ def publish_bin_collision(node, y, remove=False):
         rclpy.spin_once(node, timeout_sec=0.05)
 
 
+def run_rim_sweep(node, args, quat):
+    """통 림 높이를 훑어 "낮추면 충돌이 주는가"를 답한다."""
+    global BIN_RIM_Z_M, BIN_FLOOR_Z_M
+    y = args.bin_y[0]
+    depth = 0.05
+    print(f'통 림 높이 스윕 — y={y:.2f}, 내부 깊이 {depth*100:.0f}cm 고정, '
+          f'놓는 지점 = 림 + {args.drop_above*100:.0f}cm, 반복 {args.repeat}회')
+    print(f'통 형상 {"포함" if args.with_bin_collision else "미포함"}\n')
+    print(f'{"림 z":>7}{"바닥 z":>8}{"놓는 z":>8}'
+          f'{"point 성공":>12}{"point 이동":>11}'
+          f'{"box+yaw 성공":>14}{"box+yaw 이동":>13}')
+    for rim in args.bin_rim:
+        BIN_RIM_Z_M, BIN_FLOOR_Z_M = rim, rim - depth
+        if args.with_bin_collision:
+            publish_bin_collision(node, y)
+        flange = (0.0, y, rim + args.drop_above + GRIPPER_LEN_M)
+        out = []
+        for box, yaw in ((None, False), (BIN_BOX_XYZ, True)):
+            res = [node.plan_to(flange, quat, box_xyz=box, yaw_free=yaw)
+                   for _ in range(args.repeat)]
+            ok = [r for r in res if r['ok']]
+            out.append((len(ok),
+                        st.fmean([r['travel_deg'] for r in ok]) if ok else float('nan')))
+        print(f'{rim:7.3f}{rim-depth:8.3f}{rim+args.drop_above:8.3f}'
+              f'{out[0][0]:9d}/{args.repeat:<2d}{out[0][1]:11.0f}'
+              f'{out[1][0]:11d}/{args.repeat:<2d}{out[1][1]:13.0f}')
+    if args.with_bin_collision:
+        publish_bin_collision(node, y, remove=True)
+
+
 def downward_quat():
     """그리퍼 정면(로컬 +Z)이 아래(-Z)를 향하는 orientation.
 
@@ -143,6 +173,15 @@ def main():
                             BIN_RIM_Z_M + 0.05])
     p.add_argument('--planning-time', type=float, default=2.0)
     p.add_argument('--attempts', type=int, default=10)
+    # [2026-08-01] 통 높이를 낮추면 충돌이 주는가? 두 효과가 반대로 작용한다 —
+    # 벽이 낮아져 걸릴 것이 줄지만, 놓는 지점이 낮아져 팔이 더 아래로 뻗어야
+    # 한다. 내부 깊이(50mm)는 유지하고 받침 높이만 바꿔 림 위치를 훑는다.
+    p.add_argument('--bin-rim', nargs='+', type=float, default=None,
+                   metavar='Z',
+                   help='통 림(입구) 높이를 여러 개 훑는다(m). 안쪽 바닥은 '
+                        '항상 림-50mm. 놓는 지점은 림+--drop-above')
+    p.add_argument('--drop-above', type=float, default=0.03,
+                   help='놓는 지점을 림보다 이만큼 위에 둔다(m, 기본 3cm)')
     p.add_argument('--with-bin-collision', action='store_true',
                    help='수확통을 planning scene에 실제 형상으로 넣고 평가.\n'
                         '없으면 팔이 통을 관통하는 경로도 성공으로 집계된다')
@@ -172,6 +211,12 @@ def main():
         ('yaw',     None,        True),
         ('box+yaw', BIN_BOX_XYZ, True),
     ]
+
+    if args.bin_rim:
+        run_rim_sweep(node, args, quat)
+        node.destroy_node()
+        rclpy.shutdown()
+        return
 
     print(f'{"통 위치":>14}{"조건":>10}{"성공":>8}{"이동량":>9}{"SD":>7}{"J1 도달":>9}')
     rows = []
