@@ -144,11 +144,12 @@ def select_approach(x, y, z):
 
 class PlanProbe(Node):
 
-    def __init__(self, planning_time, attempts):
+    def __init__(self, planning_time, attempts, start_pose=None):
         super().__init__('sweep_targets_planned')
         self._client = self.create_client(GetMotionPlan, PLAN_SERVICE)
         self._planning_time = planning_time
         self._attempts = attempts
+        self.start_pose = list(start_pose or N.LOOK_POSE_JOINT_POSITIONS)
         self._limits = None
         self.create_subscription(JointState, 'joint_states', self._on_js, 10)
         self._seen_joints = None
@@ -218,14 +219,19 @@ class PlanProbe(Node):
         return True
 
     def _look_pose_state(self):
-        """모든 목표를 **같은 시작 자세**(look pose)에서 플래닝한다.
+        """모든 목표를 **같은 시작 자세**에서 플래닝한다.
 
         실제 스택의 현재 관절값을 쓰면 앞 목표의 결과에 따라 시작이 달라져
         목표 간 비교가 불가능해진다. 명시적으로 고정한다.
+
+        [2026-08-01] 시작 자세를 `--start-pose`로 바꿀 수 있게 함(기본은 look
+        pose). armed pos 후보를 평가하려면 "같은 목표들을 다른 시작 자세에서
+        플래닝했을 때 무엇이 좋아지는가"를 재야 하는데, 여기가 유일하게 시작
+        자세를 정하는 곳이다. 노드는 전혀 고치지 않아도 된다.
         """
         state = RobotState()
         state.joint_state.name = list(N.JOINT_NAMES)
-        state.joint_state.position = list(N.LOOK_POSE_JOINT_POSITIONS)
+        state.joint_state.position = list(self.start_pose)
         state.is_diff = False
         return state
 
@@ -377,6 +383,73 @@ def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0):
     return rows
 
 
+def collect_solutions(node, dets, repeat, out_path, branch_max_j1_deg=80.0):
+    """[2026-08-01] armed pos를 도출하기 위해 목표별 **정렬 관절해**를 모은다.
+
+    docs/new_concept.md §10 "그 경로의 시작점이 armed pos로 정의한다"를 위한
+    입력이다. armed pos 후보를 J1 격자로 훑는 것은 의미가 없다 — 그 격자의
+    기준이 될 look pose J1(-7.5°)이 손으로 맞춘 값이라 기구학적 의미가 없기
+    때문(docs/look_pose.md:4). 대신 "실제로 가야 할 자세들"을 모아 그 관절공간
+    중심을 구한다.
+
+    **A분기만 모은다.** 같은 목표에 도달하는 관절 조합이 두 가지 있는데,
+      A(정상)  J1 32~47°  — 베이스가 적당히 돌고 팔을 앞으로 뻗음, 이동량 453°
+      B(뒤로)  J1 122~139° — 베이스가 목표 방위각을 지나쳐 돌고 팔꿈치를 접어
+                             반대편에서 닿음, 이동량 577°(21% 많음)
+    노드의 목적함수(6축 이동량 최소)는 이미 A를 고르려 하고, 실행 단계에서
+    OMPL이 다시 뽑으면서 뒤집힐 뿐이다. 즉 A만 모으는 것은 타협이 아니라
+    "원래 쓰기로 한 해만 모으는 것"이다.
+
+    **단 폴백이 있다**: 어떤 목표는 A가 관절 한계에 걸려 B밖에 없을 수 있다.
+    A가 하나도 안 나오면 B라도 받는다 — 무조건 금지하면 그 토마토를 통째로
+    놓친다.
+    """
+    print(f'\n정렬 관절해 수집: 목표 {len(dets)}개 x 반복 {repeat}회, '
+          f'A분기 기준 |J1| < {branch_max_j1_deg:.0f}°\n')
+    collected = []
+    for d in dets:
+        best, reason = select_approach(d['base_x'], d['base_y'], d['base_z'])
+        label = f'{d.get("class_name", "?"):<8} z={d["base_z"]:.3f}'
+        if best is None:
+            print(f'{label}  기하 게이트 탈락({reason})')
+            continue
+
+        sols = []
+        for _ in range(repeat):
+            r = node.plan_to(best['align'], best['quat'])
+            if r['ok']:
+                sols.append(r)
+        if not sols:
+            print(f'{label}  플래닝 {repeat}회 전부 실패 — 제외')
+            continue
+
+        a = [s for s in sols if abs(s['j1_deg']) < branch_max_j1_deg]
+        used, branch = (a, 'A') if a else (sols, 'B(폴백)')
+        # 같은 분기 안에서도 해가 흔들리므로 6축 이동량이 가장 적은 것을 대표로.
+        rep = min(used, key=lambda s: s['travel_deg'])
+        collected.append({
+            'class_name': d.get('class_name', '?'),
+            'base_x': d['base_x'], 'base_y': d['base_y'], 'base_z': d['base_z'],
+            'branch': branch,
+            'n_success': len(sols), 'n_branch_a': len(a), 'trials': repeat,
+            'j1_deg': round(rep['j1_deg'], 2),
+            'travel_deg': round(rep['travel_deg'], 1),
+            'joints': [round(rep['final'][n], 6) for n in N.JOINT_NAMES],
+        })
+        print(f'{label}  성공 {len(sols)}/{repeat}  A분기 {len(a)}개  '
+              f'채택 {branch}  J1 {rep["j1_deg"]:+.1f}°  이동량 {rep["travel_deg"]:.0f}°')
+
+    n_a = sum(1 for c in collected if c['branch'] == 'A')
+    print(f'\n수집 {len(collected)}/{len(dets)}개  (A분기 {n_a}, B폴백 {len(collected)-n_a})')
+    if out_path:
+        with open(out_path, 'w', encoding='utf-8') as fh:
+            json.dump({'joint_names': list(N.JOINT_NAMES),
+                       'start_pose': list(node.start_pose),
+                       'solutions': collected}, fh, indent=2, ensure_ascii=False)
+        print(f'저장: {out_path}')
+    return collected
+
+
 def run_tolerance_sweep(node, dets, repeat, tolerances_deg, csv_path):
     """[2026-08-01] 방향 허용오차를 훑으며 성공률 곡선을 만든다.
 
@@ -431,6 +504,13 @@ def main():
                    help='>0이면 목표마다 계획 궤적을 /display_planned_path로 '
                         '발행하고 이 초만큼 대기 — RViz 확인·영상 녹화용. '
                         '권장 3~5초(궤적 재생 시간보다 넉넉히)')
+    p.add_argument('--start-pose', nargs=6, type=float, default=None,
+                   metavar=('J1', 'J2', 'J3', 'J4', 'J5', 'J6'),
+                   help='시작 자세를 **도 단위** 6개로 지정(기본: look pose). '
+                        'armed pos 후보 평가용 — 노드는 고치지 않아도 된다')
+    p.add_argument('--collect-solutions', type=str, default=None,
+                   metavar='OUT.json',
+                   help='목표별 정렬 관절해를 모아 JSON으로 저장(armed pos 도출용)')
     p.add_argument('--sweep-orientation-deg', nargs='+', type=float, default=None,
                    help='이 값들로 방향 허용오차를 훑으며 성공률 곡선을 만든다'
                         ' (예: --sweep-orientation-deg 2 4 6 8 10 12 15)')
@@ -456,8 +536,11 @@ def main():
     with open(args.targets, encoding='utf-8') as fh:
         dets = json.load(fh)['detections']
 
+    start_pose = ([math.radians(v) for v in args.start_pose]
+                  if args.start_pose else None)
+
     rclpy.init()
-    node = PlanProbe(args.planning_time, args.attempts)
+    node = PlanProbe(args.planning_time, args.attempts, start_pose)
     if not node.wait_ready():
         node.get_logger().error(
             f'{PLAN_SERVICE} 없음 — move_group이 떠 있는지 확인할 것')
@@ -467,7 +550,15 @@ def main():
 
     print(f'\n목표 {len(dets)}개 x 반복 {args.repeat}회 '
           f'(플래닝 시간 {args.planning_time}s, 시도 {args.attempts}회)')
-    print(f'시작 자세: look pose 고정 / 측정 구간: look pose -> 정렬 위치\n')
+    pose_label = 'look pose' if not args.start_pose else \
+        '[' + ', '.join(f'{v:+.1f}' for v in args.start_pose) + ']°'
+    print(f'시작 자세: {pose_label} 고정 / 측정 구간: 시작 자세 -> 정렬 위치\n')
+
+    if args.collect_solutions:
+        collect_solutions(node, dets, args.repeat, args.collect_solutions)
+        node.destroy_node()
+        rclpy.shutdown()
+        return
 
     if args.sweep_orientation_deg:
         run_tolerance_sweep(node, dets, args.repeat,

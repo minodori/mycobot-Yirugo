@@ -1,0 +1,320 @@
+{
+  "joint_names": [
+    "joint2_to_joint1",
+    "joint3_to_joint2",
+    "joint4_to_joint3",
+    "joint5_to_joint4",
+    "joint6_to_joint5",
+    "joint6output_to_joint6"
+  ],
+  "start_pose": [
+    -0.130376,
+    1.81619,
+    -0.989253,
+    -0.872665,
+    0.279078,
+    0.024435
+  ],
+  "solutions": [
+    {
+      "class_name": "ripe",
+      "base_x": 0.256,
+      "base_y": 0.0812,
+      "base_z": 0.3384,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 10,
+      "trials": 12,
+      "j1_deg": 47.86,
+      "travel_deg": 561.6,
+      "joints": [
+        0.835394,
+        -0.0826,
+        -1.601807,
+        1.758844,
+        -0.460657,
+        2.978298
+      ]
+    },
+    {
+      "class_name": "ripe",
+      "base_x": 0.2512,
+      "base_y": 0.0437,
+      "base_z": 0.3612,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 11,
+      "trials": 12,
+      "j1_deg": 41.95,
+      "travel_deg": 524.7,
+      "joints": [
+        0.732209,
+        0.016234,
+        -1.472914,
+        1.617028,
+        -0.377519,
+        2.889638
+      ]
+    },
+    {
+      "class_name": "ripe",
+      "base_x": 0.2536,
+      "base_y": 0.0278,
+      "base_z": 0.2242,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 8,
+      "trials": 12,
+      "j1_deg": 52.03,
+      "travel_deg": 375.0,
+      "joints": [
+        0.908087,
+        0.253045,
+        -1.328461,
+        -1.811474,
+        -2.184759,
+        -0.177526
+      ]
+    },
+    {
+      "class_name": "ripe",
+      "base_x": 0.2518,
+      "base_y": -0.0219,
+      "base_z": 0.2236,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 10,
+      "trials": 12,
+      "j1_deg": 37.43,
+      "travel_deg": 401.0,
+      "joints": [
+        0.653245,
+        0.033659,
+        -0.861343,
+        -2.286474,
+        -2.482831,
+        0.153311
+      ]
+    },
+    {
+      "class_name": "disease",
+      "base_x": 0.2692,
+      "base_y": 0.029,
+      "base_z": 0.2982,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 7,
+      "trials": 12,
+      "j1_deg": 35.23,
+      "travel_deg": 584.1,
+      "joints": [
+        0.614899,
+        -0.187904,
+        -1.802669,
+        2.12391,
+        -0.388609,
+        2.991879
+      ]
+    },
+    {
+      "class_name": "ripe",
+      "base_x": 0.267,
+      "base_y": -0.0678,
+      "base_z": 0.2612,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 9,
+      "trials": 12,
+      "j1_deg": 19.67,
+      "travel_deg": 389.2,
+      "joints": [
+        0.343381,
+        -0.099663,
+        -0.729378,
+        -1.985993,
+        -2.430773,
+        -0.295428
+      ]
+    },
+    {
+      "class_name": "ripe",
+      "base_x": 0.2452,
+      "base_y": 0.0869,
+      "base_z": 0.2723,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 10,
+      "trials": 12,
+      "j1_deg": 62.1,
+      "travel_deg": 432.9,
+      "joints": [
+        1.083863,
+        -0.004195,
+        -0.623754,
+        -2.076692,
+        -2.246159,
+        -0.401541
+      ]
+    },
+    {
+      "class_name": "ripe",
+      "base_x": 0.2479,
+      "base_y": -0.0165,
+      "base_z": 0.1691,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 5,
+      "trials": 12,
+      "j1_deg": 44.29,
+      "travel_deg": 369.9,
+      "joints": [
+        0.773085,
+        0.200947,
+        -1.563493,
+        -1.835519,
+        -2.116439,
+        0.019761
+      ]
+    },
+    {
+      "class_name": "ripe",
+      "base_x": 0.2613,
+      "base_y": 0.0268,
+      "base_z": 0.2645,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 10,
+      "trials": 12,
+      "j1_deg": 43.39,
+      "travel_deg": 392.8,
+      "joints": [
+        0.757247,
+        0.03904,
+        -0.809525,
+        -2.075865,
+        -2.518044,
+        0.01352
+      ]
+    },
+    {
+      "class_name": "ripe",
+      "base_x": 0.2682,
+      "base_y": -0.0244,
+      "base_z": 0.3459,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 11,
+      "trials": 12,
+      "j1_deg": 22.88,
+      "travel_deg": 516.3,
+      "joints": [
+        0.399359,
+        -0.124328,
+        -1.455907,
+        1.688267,
+        -0.334415,
+        2.92392
+      ]
+    },
+    {
+      "class_name": "ripe",
+      "base_x": 0.2507,
+      "base_y": 0.0669,
+      "base_z": 0.3041,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 8,
+      "trials": 12,
+      "j1_deg": 46.43,
+      "travel_deg": 585.9,
+      "joints": [
+        0.810377,
+        -0.086679,
+        -1.836049,
+        2.07898,
+        -0.421054,
+        2.908377
+      ]
+    },
+    {
+      "class_name": "disease",
+      "base_x": 0.285,
+      "base_y": -0.0666,
+      "base_z": 0.3,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 8,
+      "trials": 12,
+      "j1_deg": 10.27,
+      "travel_deg": 535.7,
+      "joints": [
+        0.179267,
+        -0.519183,
+        -1.341496,
+        2.177845,
+        -0.228244,
+        2.818801
+      ]
+    },
+    {
+      "class_name": "disease",
+      "base_x": 0.2663,
+      "base_y": -0.0191,
+      "base_z": 0.3061,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 9,
+      "trials": 12,
+      "j1_deg": 25.77,
+      "travel_deg": 557.0,
+      "joints": [
+        0.449736,
+        -0.056463,
+        -1.841099,
+        1.899629,
+        -0.390724,
+        2.999414
+      ]
+    },
+    {
+      "class_name": "disease",
+      "base_x": 0.2584,
+      "base_y": 0.0823,
+      "base_z": 0.2172,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 11,
+      "trials": 12,
+      "j1_deg": 55.83,
+      "travel_deg": 422.8,
+      "joints": [
+        0.974488,
+        -0.150207,
+        -0.778702,
+        -2.145456,
+        -2.336895,
+        -0.184775
+      ]
+    },
+    {
+      "class_name": "disease",
+      "base_x": 0.2495,
+      "base_y": -0.0585,
+      "base_z": 0.1607,
+      "branch": "A",
+      "n_success": 12,
+      "n_branch_a": 1,
+      "trials": 12,
+      "j1_deg": 32.94,
+      "travel_deg": 359.8,
+      "joints": [
+        0.574981,
+        0.142418,
+        -1.58626,
+        -1.683222,
+        -2.140764,
+        -0.049095
+      ]
+    }
+  ]
+}

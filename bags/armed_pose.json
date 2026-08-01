@@ -1,0 +1,37 @@
+{
+  "joint_names": [
+    "joint2_to_joint1",
+    "joint3_to_joint2",
+    "joint4_to_joint3",
+    "joint5_to_joint4",
+    "joint6_to_joint5",
+    "joint6output_to_joint6"
+  ],
+  "armed_pose_rad": [
+    0.472641,
+    -0.041725,
+    -1.108857,
+    0.029587,
+    -1.403859,
+    1.13149
+  ],
+  "armed_pose_deg": [
+    27.08,
+    -2.391,
+    -63.533,
+    1.695,
+    -80.435,
+    64.83
+  ],
+  "weights": [
+    3.0,
+    2.0,
+    1.5,
+    1.0,
+    1.0,
+    0.5
+  ],
+  "max_weighted_travel_deg": 363.9,
+  "source": "bags/align_solutions.json",
+  "n_solutions": 15
+}
