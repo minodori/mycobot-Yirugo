@@ -554,6 +554,11 @@ def run_tolerance_sweep(node, dets, repeat, tolerances_deg, csv_path):
 def main():
     global POSITION_TOLERANCE_M, ORIENTATION_TOLERANCE_RAD
     p = argparse.ArgumentParser(description='검출 토마토별 실제 플래닝 평가')
+    p.add_argument('--display-loop', type=int, default=1, metavar='N',
+                   help='--display-pause 모드에서 스윕 전체를 N회 반복한다. '
+                        '0이면 Ctrl+C까지 무한 반복 — RViz Trajectory 디스플레이는 '
+                        'Loop Animation이라 그냥 두면 **마지막 궤적만** 계속 '
+                        '재생되므로, 전체를 다시 보려면 이 옵션이 필요하다')
     p.add_argument('--display-pause', type=float, default=0.0,
                    help='>0이면 목표마다 계획 궤적을 /display_planned_path로 '
                         '발행하고 이 초만큼 대기 — RViz 확인·영상 녹화용. '
@@ -628,7 +633,22 @@ def main():
             node.publish_markers(dets)
             rclpy.spin_once(node, timeout_sec=0.05)
 
-    rows = evaluate_all(node, dets, args.repeat, display_pause=args.display_pause)
+        round_no = 0
+        try:
+            while args.display_loop == 0 or round_no < args.display_loop:
+                round_no += 1
+                label = (f'{round_no}회차' if args.display_loop == 0
+                         else f'{round_no}/{args.display_loop}회차')
+                print(f'\n===== {label} =====')
+                rows = evaluate_all(node, dets, args.repeat,
+                                    display_pause=args.display_pause)
+                # 다음 회차 전에 마커 색을 초기화한다 — 안 그러면 전부 초록/회색인
+                # 채로 시작해 "지금 어디를 보고 있는지"가 안 보인다.
+                node.publish_markers(dets)
+        except KeyboardInterrupt:
+            print(f'\n중단 — {round_no}회차까지 실행함')
+    else:
+        rows = evaluate_all(node, dets, args.repeat)
 
     planned = [r for r in rows if r.get('trials')]
     total_trials = sum(r['trials'] for r in planned)
