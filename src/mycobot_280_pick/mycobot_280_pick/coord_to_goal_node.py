@@ -167,6 +167,17 @@ ARMED_POSE_JOINT_POSITIONS = [
     1.131500,    # +64.83도
 ]
 
+# 팔이 이미 armed pose에 있다고 볼 허용 오차(rad). 이 안이면 경유를 건너뛴다.
+# LOOK_POSE_TOLERANCE_RAD(0.08)와 같은 기준 — 실물 정지 오차와 컨트롤러
+# tolerance를 감안한 값이다.
+ARMED_POSE_TOLERANCE_RAD = 0.08
+
+# armed pose를 경유할 때 그 자리에서 잠깐 멈추는 시간(초).
+# 기능상 필요한 대기는 아니고, **사람이 경유를 눈으로 확인할 수 있게** 하는
+# 것이 목적이다(사용자 요청, 2026-08-01). 리포트 영상에서도 "look pose ->
+# armed pose -> target" 구조가 드러나야 한다.
+ARMED_POSE_DWELL_SEC = 0.5
+
 # ---- 로봇 설정 (tomato_scene_test.py에서 확인된 값과 동일) ----
 JOINT_NAMES = [
     'joint2_to_joint1',
@@ -981,6 +992,9 @@ class CoordToGoalNode(Node):
         self._busy = False
         self._completion_timer = None
         self._clear_timer = None
+        # [2026-08-01] armed pose 경유 단계용 타이머(_start_planning 참고).
+        self._armed_transit_timer = None
+        self._armed_dwell_timer = None
         self._pending_approach_position = None
         self._pending_target_position = None
         # [2026-07-30] 원본 목표(토마토) 위치 — 접근축 후보를 만드는 기준.
@@ -1176,6 +1190,10 @@ class CoordToGoalNode(Node):
             '_look_pose_completion_timer',
             '_gripper_completion_timer',
             '_post_grasp_dwell_timer',
+            # [2026-08-01] armed pose 경유 단계. 비상 정지가 이 둘을 안 끄면
+            # 정지 직후에도 경유가 이어져 팔이 다시 움직인다.
+            '_armed_transit_timer',
+            '_armed_dwell_timer',
         ):
             timer = getattr(self, timer_attr)
             if timer is not None:
@@ -1564,10 +1582,68 @@ class CoordToGoalNode(Node):
             )
         return candidates
 
+    def _is_near_armed_pose(self) -> bool:
+        """팔이 이미 armed pose에 있는가(경유를 건너뛰어도 되는가)."""
+        current = self._get_current_arm_joint_positions()
+        if current is None:
+            return False
+        return all(
+            abs(current[name] - target) <= ARMED_POSE_TOLERANCE_RAD
+            for name, target in zip(JOINT_NAMES, ARMED_POSE_JOINT_POSITIONS)
+        )
+
     def _start_planning(self) -> None:
+        """[2026-08-01] 정렬(1/5) 전에 armed pose를 **경유**한다.
+
+        Phase 2에서 복귀만 armed pose로 바꿨더니 나가는 길이 비대칭이 됐다 —
+        시퀀스 첫 목표는 여전히 look pose에서 목표로 직행했다. 그런데 armed pose
+        도입의 근거가 된 측정은 전부 "armed pose에서 출발"을 전제한 값이다.
+        경유를 넣어야 그 전제가 실제로 성립한다.
+
+        이미 armed pose에 있으면(= 두 번째 목표부터) 건너뛴다. 즉 실제로 이
+        경유가 일어나는 것은 시퀀스당 1회, look pose에서 시작할 때뿐이다.
+        """
         self._clear_timer.cancel()
         self._clear_timer = None
 
+        if self._use_armed_pose and not self._is_near_armed_pose():
+            self.get_logger().info('[0/5 armed pose] 경유 이동 중...')
+            self._moveit2.move_to_configuration(
+                ARMED_POSE_JOINT_POSITIONS, joint_names=JOINT_NAMES
+            )
+            self._armed_transit_timer = self.create_timer(
+                COMPLETION_POLL_PERIOD, self._check_armed_transit_complete
+            )
+            return
+
+        self._continue_planning_from_armed()
+
+    def _check_armed_transit_complete(self) -> None:
+        if self._moveit2.query_state() != MoveIt2State.IDLE:
+            return
+        self._armed_transit_timer.cancel()
+        self._armed_transit_timer = None
+
+        if self._moveit2.motion_suceeded:
+            self.get_logger().info(
+                f'[0/5 armed pose] 도착. {ARMED_POSE_DWELL_SEC}초 정지 후 정렬 시작.'
+            )
+        else:
+            # 경유 실패는 치명적이지 않다 — 어디에 있든 정렬 플래닝은 시도할 수
+            # 있다. 다만 이동량이 커질 뿐이므로 경고만 남기고 진행한다.
+            self.get_logger().warn(
+                '[0/5 armed pose] 경유 실패 — 현재 자세에서 그대로 정렬 시도.'
+            )
+        self._armed_dwell_timer = self.create_timer(
+            ARMED_POSE_DWELL_SEC, self._on_armed_dwell_done
+        )
+
+    def _on_armed_dwell_done(self) -> None:
+        self._armed_dwell_timer.cancel()
+        self._armed_dwell_timer = None
+        self._continue_planning_from_armed()
+
+    def _continue_planning_from_armed(self) -> None:
         if self._clear_octomap_client.service_is_ready():
             self._clear_octomap_client.call_async(Empty.Request())
 
