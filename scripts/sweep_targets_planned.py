@@ -70,6 +70,7 @@ try:
         BoundingVolume,
         Constraints,
         DisplayTrajectory,
+        JointConstraint,
         MotionPlanRequest,
         OrientationConstraint,
         PositionConstraint,
@@ -235,6 +236,45 @@ class PlanProbe(Node):
         state.is_diff = False
         return state
 
+    def plan_to_config(self, target_joints, from_joints=None):
+        """[2026-08-01] 관절 목표(joint goal)로 플래닝한다 — 복귀 구간용.
+
+        복귀는 `move_to_configuration`(pose goal이 아님)이라 목표가 결정적이다.
+        그런데 **출발 자세**는 가는 길에서 OMPL이 고른 분기에 따라 달라진다.
+        즉 복귀 비용은 가는 길의 분기와 결합돼 있고, 그걸 재려면 임의의 출발
+        자세에서 관절 목표로 플래닝할 수 있어야 한다.
+        """
+        req = MotionPlanRequest()
+        req.group_name = N.GROUP_NAME
+        req.num_planning_attempts = self._attempts
+        req.allowed_planning_time = self._planning_time
+        req.max_velocity_scaling_factor = 1.0
+        req.max_acceleration_scaling_factor = 1.0
+
+        state = RobotState()
+        state.joint_state.name = list(N.JOINT_NAMES)
+        state.joint_state.position = list(from_joints or self.start_pose)
+        state.is_diff = False
+        req.start_state = state
+
+        ws = WorkspaceParameters()
+        ws.header.frame_id = N.BASE_LINK_NAME
+        ws.min_corner.x = ws.min_corner.y = ws.min_corner.z = -1.0
+        ws.max_corner.x = ws.max_corner.y = ws.max_corner.z = 1.0
+        req.workspace_parameters = ws
+
+        goal = Constraints()
+        for name, value in zip(N.JOINT_NAMES, target_joints):
+            jc = JointConstraint()
+            jc.joint_name = name
+            jc.position = value
+            jc.tolerance_above = jc.tolerance_below = 0.01
+            jc.weight = 1.0
+            goal.joint_constraints.append(jc)
+        req.goal_constraints = [goal]
+
+        return self._send(req)
+
     def plan_to(self, position, quat, box_xyz=None, yaw_free=False):
         req = MotionPlanRequest()
         req.group_name = N.GROUP_NAME
@@ -293,6 +333,9 @@ class PlanProbe(Node):
         goal.orientation_constraints = [oc]
         req.goal_constraints = [goal]
 
+        return self._send(req)
+
+    def _send(self, req):
         request = GetMotionPlan.Request()
         request.motion_plan_request = req
         t0 = time.time()
