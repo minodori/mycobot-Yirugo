@@ -1,0 +1,95 @@
+# 검출 토마토 스윕(scripts/sweep_targets_planned.py --display-pause)을 눈으로
+# 보거나 영상으로 녹화할 때 쓰는 RViz 설정.
+#
+#   rviz2 -d src/mycobot_280_pick/config/sweep_view.rviz
+#
+# 담긴 디스플레이:
+#   RobotModel   look pose에 선 팔(시작 자세)
+#   Trajectory   /display_planned_path — 계획된 정렬 궤적을 반투명 팔로 재생
+#   MarkerArray  /tomato_markers — 검출된 토마토 15개.
+#                빨강=ripe, 주황=disease, 초록=계획 성공, 회색=계획 실패,
+#                현재 목표는 1.6배 크게 그린다
+#
+# scene_replay.rviz와 달리 카메라·octomap이 없다. 이 스윕은 로봇도 카메라도
+# 없이 도는 것이라 화면에 있어야 할 것은 팔·궤적·목표뿐이다.
+#
+# Color Transformer를 하드코딩하지 않는 이유는 scene_replay.rviz 주석 참고.
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded: ~
+    Tree Height: 700
+Visualization Manager:
+  Class: ""
+  Name: root
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 0.1
+      Plane Cell Count: 20
+      Color: 160; 160; 164
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Enabled: true
+      Description Source: Topic
+      Description Topic:
+        Value: /robot_description
+        Depth: 5
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+      Alpha: 0.6
+    - Class: moveit_rviz_plugin/Trajectory
+      Name: Trajectory (계획 경로)
+      Enabled: true
+      Robot Description: robot_description
+      Trajectory Topic: /display_planned_path
+      Show Robot Visual: true
+      Show Robot Collision: false
+      Show Trail: false
+      # 궤적 재생 속도. 계획만 한 궤적이라 time_from_start가 짧을 수 있어
+      # 루프를 켜 두면 --display-pause 동안 반복 재생되어 보기 좋다.
+      Loop Animation: true
+      Interrupt Display: false
+      State Display Time: 0.05 s
+    - Class: rviz_default_plugins/MarkerArray
+      Name: 토마토 (검출 결과)
+      Enabled: true
+      Topic:
+        Value: /tomato_markers
+        Depth: 10
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+      Marker Scale: 0.15
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: g_base
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Distance: 1.0
+      Yaw: 5.5
+      Pitch: 0.35
+      Focal Point:
+        X: 0.2
+        Y: 0
+        Z: 0.25
+      Near Clip Distance: 0.01
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 1000
+  Width: 1600

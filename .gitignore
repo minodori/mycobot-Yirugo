@@ -23,3 +23,9 @@ frames_*.pdf
 bags/*
 !bags/*.json
 !bags/*.csv
+
+# 화면 녹화 영상. 리포트용 산출물이라 재생성 가능하고 용량이 크다.
+# 주의: mp4는 ffmpeg을 q 없이 강제 종료하면 moov atom이 안 써져 통째로 못 쓴다.
+# 녹화 시 `-movflags +frag_keyframe+empty_moov`를 붙일 것(실측 검증함).
+*.mp4
+*.mkv

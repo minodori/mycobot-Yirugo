@@ -69,6 +69,7 @@ try:
     from moveit_msgs.msg import (
         BoundingVolume,
         Constraints,
+        DisplayTrajectory,
         MotionPlanRequest,
         OrientationConstraint,
         PositionConstraint,
@@ -79,6 +80,8 @@ try:
     from rclpy.node import Node
     from sensor_msgs.msg import JointState
     from shape_msgs.msg import SolidPrimitive
+    from std_msgs.msg import ColorRGBA
+    from visualization_msgs.msg import Marker, MarkerArray
     from mycobot_280_pick import coord_to_goal_node as N
 except ImportError as exc:  # pragma: no cover
     sys.exit(f'import 실패: {exc}\n  source /opt/ros/jazzy/setup.bash 를 먼저 할 것')
@@ -149,6 +152,58 @@ class PlanProbe(Node):
         self._limits = None
         self.create_subscription(JointState, 'joint_states', self._on_js, 10)
         self._seen_joints = None
+        # [2026-08-01] 시각화/영상 녹화용. 서비스 기반 플래닝은 move_group이
+        # /display_planned_path를 발행하지 않으므로(그건 MoveGroup 액션 경로),
+        # 계획 결과를 우리가 직접 발행해야 RViz에 뜬다.
+        self._display_pub = self.create_publisher(
+            DisplayTrajectory, '/display_planned_path', 10)
+        self._marker_pub = self.create_publisher(
+            MarkerArray, '/tomato_markers', 10)
+
+    def publish_trajectory(self, response_trajectory):
+        msg = DisplayTrajectory()
+        msg.model_id = 'firefighter'
+        msg.trajectory_start = self._look_pose_state()
+        msg.trajectory = [response_trajectory]
+        self._display_pub.publish(msg)
+
+    def publish_markers(self, dets, current_index=None, status_by_index=None):
+        """검출 토마토를 구로 표시한다. 영상에서 "무엇을 향해 가는지"가 보여야
+        의미가 있으므로, 현재 목표는 크게/불투명하게 그린다.
+
+        색: ripe=빨강, disease=주황, 그 외=회색. 평가가 끝난 것은 성공=초록,
+        실패=검정 테두리 대신 어둡게 — 색만으로 결과가 읽히도록 한다.
+        """
+        array = MarkerArray()
+        for i, d in enumerate(dets):
+            m = Marker()
+            m.header.frame_id = N.BASE_LINK_NAME
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.ns = 'tomatoes'
+            m.id = i
+            m.type = Marker.SPHERE
+            m.action = Marker.ADD
+            m.pose.position.x = d['base_x']
+            m.pose.position.y = d['base_y']
+            m.pose.position.z = d['base_z']
+            m.pose.orientation.w = 1.0
+            # 추정 반지름 그대로 그린다(지름 = 2r). 실제 크기감이 보여야 한다.
+            r = float(d.get('radius_m', 0.017))
+            scale = 2.0 * r * (1.6 if i == current_index else 1.0)
+            m.scale.x = m.scale.y = m.scale.z = scale
+
+            name = d.get('class_name', '?')
+            base = {'ripe': (0.85, 0.10, 0.10), 'disease': (0.95, 0.55, 0.10)}
+            cr, cg, cb = base.get(name, (0.6, 0.6, 0.6))
+            status = (status_by_index or {}).get(i)
+            if status == 'ok':
+                cr, cg, cb = (0.15, 0.75, 0.20)
+            elif status == 'fail':
+                cr, cg, cb = (0.25, 0.25, 0.25)
+            alpha = 1.0 if i == current_index else 0.65
+            m.color = ColorRGBA(r=cr, g=cg, b=cb, a=alpha)
+            array.markers.append(m)
+        self._marker_pub.publish(array)
 
     def _on_js(self, msg):
         if self._seen_joints is None:
@@ -252,6 +307,7 @@ class PlanProbe(Node):
         j1_final = final[idx[j1_name]] if j1_name in idx else float('nan')
         return {
             'ok': True,
+            'trajectory': res.trajectory,   # --display로 RViz에 재생할 때 씀
             'wall_s': elapsed,
             'plan_s': res.planning_time,
             'points': len(traj.points),
@@ -262,9 +318,122 @@ class PlanProbe(Node):
         }
 
 
+def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0):
+    """모든 목표를 repeat회씩 플래닝하고 행 목록을 돌려준다.
+
+    display_pause > 0이면 목표마다 계획 궤적을 /display_planned_path로 발행하고
+    그만큼 쉰다 — RViz에서 눈으로 보거나 화면 녹화할 때 쓴다. 이때는 반복 중
+    **마지막 성공 궤적**을 보여준다(여러 개를 연달아 쏘면 RViz가 마지막 것만
+    재생해서 앞의 것이 안 보인다).
+    """
+    rows = []
+    status = {}
+    for index, d in enumerate(dets):
+        best, reason = select_approach(d['base_x'], d['base_y'], d['base_z'])
+        if best is None:
+            rows.append({**d, 'reason': reason, 'success': 0, 'trials': 0})
+            status[index] = 'fail'
+            if display_pause > 0:
+                node.publish_markers(dets, index, status)
+            continue
+        if display_pause > 0:
+            node.publish_markers(dets, index, status)
+        results = [node.plan_to(best['align'], best['quat']) for _ in range(repeat)]
+        if display_pause > 0:
+            ok_results = [r for r in results if r['ok']]
+            status[index] = 'ok' if ok_results else 'fail'
+            if ok_results:
+                node.publish_trajectory(ok_results[-1]['trajectory'])
+            node.publish_markers(dets, index, status)
+            t_end = time.time() + display_pause
+            while time.time() < t_end:
+                rclpy.spin_once(node, timeout_sec=0.05)
+        good = [r for r in results if r['ok']]
+        j1 = [r['j1_deg'] for r in good]
+        travel = [r['travel_deg'] for r in good]
+        plan_s = [r['plan_s'] for r in good]
+        row = {
+            **{k: d[k] for k in ('class_name', 'base_x', 'base_y', 'base_z') if k in d},
+            'reason': 'ok',
+            'trials': repeat,
+            'success': len(good),
+            'elev_deg': round(best['elev_deg'], 1),
+            'pred_j1_deg': round(best['min_j1_deg'], 1),
+            'j1_mean_deg': round(statistics.fmean(j1), 1) if j1 else None,
+            'j1_min_deg': round(min(j1), 1) if j1 else None,
+            'j1_max_deg': round(max(j1), 1) if j1 else None,
+            'travel_mean_deg': round(statistics.fmean(travel), 0) if travel else None,
+            'travel_sd_deg': round(statistics.pstdev(travel), 0) if len(travel) > 1 else 0,
+            'plan_s_mean': round(statistics.fmean(plan_s), 3) if plan_s else None,
+        }
+        rows.append(row)
+        if verbose:
+            j1_txt = (f'J1 {row["j1_min_deg"]:.0f}~{row["j1_max_deg"]:.0f}°'
+                      if j1 else 'J1 —')
+            print(f'{d.get("class_name", "?"):<8} z={d["base_z"]:.3f}  '
+                  f'성공 {len(good)}/{repeat}  {j1_txt}  '
+                  f'이동량 {row["travel_mean_deg"] or 0:.0f}°±{row["travel_sd_deg"]:.0f}  '
+                  f'플래닝 {row["plan_s_mean"] or 0:.2f}s')
+    return rows
+
+
+def run_tolerance_sweep(node, dets, repeat, tolerances_deg, csv_path):
+    """[2026-08-01] 방향 허용오차를 훑으며 성공률 곡선을 만든다.
+
+    왜 필요한가: 첫 실행(2.9°)에서 15개 중 5개가 전회 실패했는데 11.5°로 풀자
+    1개로 줄었다. 즉 **성공률이 이 값 하나에 크게 좌우된다**. 그러면 "이 베드를
+    수확할 수 있는가"라는 질문은 "그리퍼를 얼마나 정확히 겨눠야 하는가"와 같은
+    질문이 된다 — 실물 정밀도 요구사항을 정하는 근거가 되므로 곡선으로 남긴다.
+
+    주의: 허용오차를 키우면 플래닝은 쉬워지지만 그리퍼가 목표를 비스듬히 물게
+    되어 실제 파지 성공률은 반대로 떨어질 수 있다. 이 곡선만으로 "크게 잡을수록
+    좋다"고 읽으면 안 된다 — 실물 파지 검증이 따로 필요하다.
+    """
+    global ORIENTATION_TOLERANCE_RAD
+    print(f'\n방향 허용오차 스윕: {len(tolerances_deg)}개 값 x 목표 {len(dets)}개 '
+          f'x 반복 {repeat}회\n')
+    print(f'{"허용오차":>8}{"성공률":>10}{"전회성공":>9}{"간헐":>6}{"전회실패":>9}'
+          f'{"A무리":>7}{"B무리":>7}')
+    summary = []
+    for deg in tolerances_deg:
+        ORIENTATION_TOLERANCE_RAD = math.radians(deg)
+        rows = evaluate_all(node, dets, repeat, verbose=False)
+        planned = [r for r in rows if r.get('trials')]
+        trials = sum(r['trials'] for r in planned)
+        ok = sum(r['success'] for r in planned)
+        full = sum(1 for r in planned if r['success'] == r['trials'])
+        never = sum(1 for r in planned if r['success'] == 0)
+        partial = len(planned) - full - never
+        j1 = [r['j1_mean_deg'] for r in planned if r['j1_mean_deg'] is not None]
+        a = sum(1 for v in j1 if v < 80)
+        b = len(j1) - a
+        print(f'{deg:7.1f}°{100*ok/trials:9.1f}%{full:9d}{partial:6d}{never:9d}'
+              f'{a:7d}{b:7d}')
+        summary.append({'tolerance_deg': deg, 'success_pct': round(100*ok/trials, 1),
+                        'trials': trials, 'success': ok, 'full': full,
+                        'partial': partial, 'never': never,
+                        'branch_a': a, 'branch_b': b})
+
+    if csv_path:
+        import csv
+        with open(csv_path, 'w', newline='', encoding='utf-8') as fh:
+            w = csv.DictWriter(fh, fieldnames=list(summary[0]))
+            w.writeheader()
+            w.writerows(summary)
+        print(f'\nCSV 저장: {csv_path} ({len(summary)}행)')
+    return summary
+
+
 def main():
     global POSITION_TOLERANCE_M, ORIENTATION_TOLERANCE_RAD
     p = argparse.ArgumentParser(description='검출 토마토별 실제 플래닝 평가')
+    p.add_argument('--display-pause', type=float, default=0.0,
+                   help='>0이면 목표마다 계획 궤적을 /display_planned_path로 '
+                        '발행하고 이 초만큼 대기 — RViz 확인·영상 녹화용. '
+                        '권장 3~5초(궤적 재생 시간보다 넉넉히)')
+    p.add_argument('--sweep-orientation-deg', nargs='+', type=float, default=None,
+                   help='이 값들로 방향 허용오차를 훑으며 성공률 곡선을 만든다'
+                        ' (예: --sweep-orientation-deg 2 4 6 8 10 12 15)')
     p.add_argument('--targets', default='bags/lab_bed_detections.json')
     p.add_argument('--repeat', type=int, default=5,
                    help='목표당 반복 횟수. OMPL이 확률적이라 신뢰도 측정에 필요')
@@ -300,41 +469,21 @@ def main():
           f'(플래닝 시간 {args.planning_time}s, 시도 {args.attempts}회)')
     print(f'시작 자세: look pose 고정 / 측정 구간: look pose -> 정렬 위치\n')
 
-    rows = []
-    for d in dets:
-        best, reason = select_approach(d['base_x'], d['base_y'], d['base_z'])
-        label = f'{d.get("class_name", "?"):<8} z={d["base_z"]:.3f}'
-        if best is None:
-            print(f'{label}  기하 게이트 탈락({reason}) — 플래닝 생략')
-            rows.append({**d, 'reason': reason, 'success': 0, 'trials': 0})
-            continue
+    if args.sweep_orientation_deg:
+        run_tolerance_sweep(node, dets, args.repeat,
+                            args.sweep_orientation_deg, args.csv)
+        node.destroy_node()
+        rclpy.shutdown()
+        return
 
-        results = [node.plan_to(best['align'], best['quat']) for _ in range(args.repeat)]
-        good = [r for r in results if r['ok']]
-        j1 = [r['j1_deg'] for r in good]
-        travel = [r['travel_deg'] for r in good]
-        plan_s = [r['plan_s'] for r in good]
+    if args.display_pause > 0:
+        # 시작 시 전체 토마토를 한 번 그려 두고 잠깐 기다린다 — RViz 구독이
+        # 붙기 전에 쏘면 아무것도 안 보인다(DDS 디스커버리).
+        for _ in range(40):
+            node.publish_markers(dets)
+            rclpy.spin_once(node, timeout_sec=0.05)
 
-        row = {
-            **{k: d[k] for k in ('class_name', 'base_x', 'base_y', 'base_z') if k in d},
-            'reason': 'ok',
-            'trials': args.repeat,
-            'success': len(good),
-            'elev_deg': round(best['elev_deg'], 1),
-            'pred_j1_deg': round(best['min_j1_deg'], 1),
-            'j1_mean_deg': round(statistics.fmean(j1), 1) if j1 else None,
-            'j1_min_deg': round(min(j1), 1) if j1 else None,
-            'j1_max_deg': round(max(j1), 1) if j1 else None,
-            'travel_mean_deg': round(statistics.fmean(travel), 0) if travel else None,
-            'travel_sd_deg': round(statistics.pstdev(travel), 0) if len(travel) > 1 else 0,
-            'plan_s_mean': round(statistics.fmean(plan_s), 3) if plan_s else None,
-        }
-        rows.append(row)
-        j1_txt = (f'J1 {row["j1_min_deg"]:.0f}~{row["j1_max_deg"]:.0f}°'
-                  if j1 else 'J1 —')
-        print(f'{label}  성공 {len(good)}/{args.repeat}  {j1_txt}  '
-              f'이동량 {row["travel_mean_deg"] or 0:.0f}°±{row["travel_sd_deg"]:.0f}  '
-              f'플래닝 {row["plan_s_mean"] or 0:.2f}s')
+    rows = evaluate_all(node, dets, args.repeat, display_pause=args.display_pause)
 
     planned = [r for r in rows if r.get('trials')]
     total_trials = sum(r['trials'] for r in planned)
