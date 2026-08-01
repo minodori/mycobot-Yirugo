@@ -39,9 +39,15 @@ import sys
 sys.path.insert(0, __file__.rsplit('/', 1)[0])
 
 import rclpy
+from geometry_msgs.msg import Pose
+from moveit_msgs.msg import CollisionObject, PlanningScene
+from shape_msgs.msg import SolidPrimitive
 from sweep_targets_planned import PlanProbe
 import sweep_targets_planned as S
 from mycobot_280_pick import coord_to_goal_node as N
+
+BIN_OBJECT_ID = 'harvest_bin'
+BIN_WALL_M = 0.005
 
 # 수확통 실측 (2026-08-01, 사용자 제공). g_base의 z=0이 곧 지면이다
 # (world -> g_base가 identity임을 TF로 확인).
@@ -68,6 +74,54 @@ ARMED_POSE_DEG = [27.08, -2.39, -63.53, 1.70, -80.44, 64.83]
 GRIPPER_LEN_M = N.GRIPPER_LENGTH_OFFSET_M
 
 
+def publish_bin_collision(node, y, remove=False):
+    """수확통을 planning scene에 실제 형상으로 넣는다.
+
+    이게 없으면 팔이 통을 관통하는 경로도 '성공'으로 집계된다 — 첫 측정의
+    한계였다. 아래 5개 프리미티브로 근사한다:
+      받침   바닥(z=0)부터 안쪽 바닥(z=0.100)까지 꽉 찬 상자
+      벽 4개 안쪽 바닥부터 림(z=0.150)까지, 두께 5mm
+
+    ACM(allowed collision matrix)은 **건드리지 않는다.** PlanningScene diff의
+    ACM은 병합이 아니라 통째 대체라, 부분 발행하면 SRDF self-collision-disable이
+    전부 소실되는 사고가 있었다(docs/obstacle_avoidance_manual_test.md).
+    world.collision_objects만 넣는 것은 가산이라 안전하다.
+    """
+    obj = CollisionObject()
+    obj.header.frame_id = N.BASE_LINK_NAME
+    obj.id = BIN_OBJECT_ID
+    obj.operation = CollisionObject.REMOVE if remove else CollisionObject.ADD
+
+    if not remove:
+        outer = BIN_INNER_M + 2 * BIN_WALL_M
+        half = BIN_INNER_M / 2.0 + BIN_WALL_M / 2.0
+        wall_h = BIN_RIM_Z_M - BIN_FLOOR_Z_M
+        specs = [
+            # (dx, dy, dz, x, y, z) — 모두 g_base 기준
+            (outer, outer, BIN_FLOOR_Z_M, 0.0, y, BIN_FLOOR_Z_M / 2.0),
+            (outer, BIN_WALL_M, wall_h, 0.0, y + half, BIN_FLOOR_Z_M + wall_h / 2.0),
+            (outer, BIN_WALL_M, wall_h, 0.0, y - half, BIN_FLOOR_Z_M + wall_h / 2.0),
+            (BIN_WALL_M, BIN_INNER_M, wall_h, +half, y, BIN_FLOOR_Z_M + wall_h / 2.0),
+            (BIN_WALL_M, BIN_INNER_M, wall_h, -half, y, BIN_FLOOR_Z_M + wall_h / 2.0),
+        ]
+        for dx, dy, dz, px, py, pz in specs:
+            prim = SolidPrimitive()
+            prim.type = SolidPrimitive.BOX
+            prim.dimensions = [dx, dy, dz]
+            pose = Pose()
+            pose.position.x, pose.position.y, pose.position.z = px, py, pz
+            pose.orientation.w = 1.0
+            obj.primitives.append(prim)
+            obj.primitive_poses.append(pose)
+
+    scene = PlanningScene()
+    scene.is_diff = True
+    scene.world.collision_objects = [obj]
+    node._scene_pub.publish(scene)
+    for _ in range(20):
+        rclpy.spin_once(node, timeout_sec=0.05)
+
+
 def downward_quat():
     """그리퍼 정면(로컬 +Z)이 아래(-Z)를 향하는 orientation.
 
@@ -89,6 +143,9 @@ def main():
                             BIN_RIM_Z_M + 0.05])
     p.add_argument('--planning-time', type=float, default=2.0)
     p.add_argument('--attempts', type=int, default=10)
+    p.add_argument('--with-bin-collision', action='store_true',
+                   help='수확통을 planning scene에 실제 형상으로 넣고 평가.\n'
+                        '없으면 팔이 통을 관통하는 경로도 성공으로 집계된다')
     args = p.parse_args()
 
     S.ORIENTATION_TOLERANCE_RAD = 0.2
@@ -97,6 +154,7 @@ def main():
 
     rclpy.init()
     node = PlanProbe(args.planning_time, args.attempts, start)
+    node._scene_pub = node.create_publisher(PlanningScene, '/planning_scene', 10)
     if not node.wait_ready():
         raise SystemExit('move_group 없음')
 
@@ -118,6 +176,8 @@ def main():
     print(f'{"통 위치":>14}{"조건":>10}{"성공":>8}{"이동량":>9}{"SD":>7}{"J1 도달":>9}')
     rows = []
     for y in args.bin_y:
+        if args.with_bin_collision:
+            publish_bin_collision(node, y)
         for z in args.bin_z:
             flange = (0.0, y, z + GRIPPER_LEN_M)
             for name, box, yaw in conditions:
@@ -146,6 +206,8 @@ def main():
         print(f'  {name:<9} 성공 {tot:3d}/{n:<3d} ({100*tot/n:5.1f}%)   '
               f'이동량 평균 {st.fmean(valid) if valid else float("nan"):.0f}°')
 
+    if args.with_bin_collision:
+        publish_bin_collision(node, args.bin_y[-1], remove=True)
     node.destroy_node()
     rclpy.shutdown()
 
