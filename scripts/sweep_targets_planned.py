@@ -47,8 +47,16 @@ FakeSystem은 궤적을 **실시간으로** 재생하므로 사이클당 약 30�
 
 `enable_octomap:=false`인 이유는 2절 함정 2와 같다 — 카메라가 없으면 octomap은
 비어 있지만, 켜 두면 occupancy_map_monitor가 붙어 불필요한 부하만 준다.
-장애물 회피까지 평가하려면 얼린 octomap을 주입한 뒤 `--with-octomap`으로 돌릴 것
-(미구현).
+
+장애물까지 넣고 재려면 `--tomatoes`(열매를 구로) 와 `--octomap FILE`(녹화 장면의
+줄기·지지대)을 준다. octomap 파일은 `scripts/octomap_io.py capture`로 만든다.
+
+    python3 -u scripts/sweep_targets_planned.py --repeat 10 \
+        --orientation-tolerance 0.2 --tomatoes --octomap bags/bed_look_octomap.bin
+
+**씬을 바꾸면 수치가 바뀐다**(2절 함정 3). 어느 씬에서 잰 값인지 반드시 같이
+기록할 것. 씬 구성을 교차로 비교하려면 `scripts/eval_bed_scene.py`를 쓰는 편이
+낫다 — 한 프로세스 안에서 조건만 갈아 끼우므로 환경 차이가 섞이지 않는다.
 """
 
 import argparse
@@ -69,6 +77,7 @@ try:
     from moveit_msgs.msg import (
         BoundingVolume,
         Constraints,
+        DisplayRobotState,
         DisplayTrajectory,
         JointConstraint,
         MotionPlanRequest,
@@ -77,7 +86,7 @@ try:
         RobotState,
         WorkspaceParameters,
     )
-    from moveit_msgs.srv import GetMotionPlan
+    from moveit_msgs.srv import GetCartesianPath, GetMotionPlan
     from rclpy.node import Node
     from sensor_msgs.msg import JointState
     from shape_msgs.msg import SolidPrimitive
@@ -90,6 +99,13 @@ except ImportError as exc:  # pragma: no cover
 WRIST_LATERAL_OFFSET_M = 0.0732
 SHOULDER = [0.0, 0.0, N.SHOULDER_HEIGHT_M]
 PLAN_SERVICE = '/plan_kinematic_path'
+# 스윕 전용 궤적 표시 토픽. 표준 /display_planned_path를 쓰면 move_group이 쏘는
+# 원본 궤적과 섞인다(PlanProbe.__init__ 주석). sweep_view.rviz의 Trajectory
+# 디스플레이가 이 토픽을 본다.
+DISPLAY_TOPIC = '/sweep_display_path'
+# 애니메이션을 **스크립트가 직접 그릴 때** 쓰는 토픽. sweep_view.rviz의
+# RobotState 디스플레이가 이걸 본다. 아래 animate_trajectory 주석 참고.
+STATE_TOPIC = '/sweep_robot_state'
 
 # 목표 허용오차. coord_to_goal_node는 tolerance 없는 정확한 목표를 쓰지만, 그건
 # 실행까지 하는 실제 파지라 그래야 한다. 여기서는 "도달 가능한가"를 보는 것이라
@@ -154,20 +170,169 @@ class PlanProbe(Node):
         self._limits = None
         self.create_subscription(JointState, 'joint_states', self._on_js, 10)
         self._seen_joints = None
-        # [2026-08-01] 시각화/영상 녹화용. 서비스 기반 플래닝은 move_group이
-        # /display_planned_path를 발행하지 않으므로(그건 MoveGroup 액션 경로),
-        # 계획 결과를 우리가 직접 발행해야 RViz에 뜬다.
+        # [2026-08-01] 시각화/영상 녹화용. 계획 결과를 우리가 직접 발행한다.
+        #
+        # **전용 토픽을 쓴다 — 이게 중요하다.** 처음엔 표준 토픽
+        # `/display_planned_path`에 쐈는데, 실측해 보니 그 토픽의 발행자가
+        # **6개**였고 그중 5개가 move_group이었다. 서비스(`/plan_kinematic_path`)로
+        # 계획해도 move_group이 결과를 그 토픽에 그대로 발행한다("액션 경로에서만
+        # 발행한다"고 적어 뒀던 예전 주석은 틀렸다).
+        #
+        # 그래서 RViz가 재생하던 것은 우리가 시간을 손본 궤적이 아니라 **move_group이
+        # 쏜 원본들**이었다. --repeat 3이면 목표마다 원본이 3개 더 날아가므로,
+        # 한 목표에서 궤적이 열댓 번 재생되고 재생 속도 조절도 전혀 안 먹혔다.
+        # 토픽을 분리하면 목표당 정확히 1개만 흐른다.
         self._display_pub = self.create_publisher(
-            DisplayTrajectory, '/display_planned_path', 10)
+            DisplayTrajectory, DISPLAY_TOPIC, 10)
         self._marker_pub = self.create_publisher(
             MarkerArray, '/tomato_markers', 10)
+        self._state_pub = self.create_publisher(
+            DisplayRobotState, STATE_TOPIC, 10)
+        # [3/5] 직진 접근을 재현하려면 노드와 같은 서비스를 써야 한다.
+        self._cart_client = self.create_client(GetCartesianPath,
+                                               '/compute_cartesian_path')
 
-    def publish_trajectory(self, response_trajectory):
+    def plan_straight_in(self, from_joints, best):
+        """정렬 자세 -> flange 목표의 **직진 접근**([3/5])을 계획한다.
+
+        스윕이 지금까지 보여준 것은 [1/5] 정렬(armed -> 정렬 위치)뿐이었다.
+        그런데 "어느 방향에서 목표로 진입하는가"를 정하는 것은 정렬이 아니라
+        **이 직진 구간**이다. 정렬은 OMPL 자유공간 경로라 마지막에 어느
+        방향에서 들어올지 보장이 없고, 화면에서 본 "측면/아래위 진입"의
+        상당 부분이 그 꼬리였다. 둘을 이어 붙여야 판단이 가능하다.
+
+        노드의 `_move_arm_cartesian`과 같은 서비스·같은 해상도를 쓰므로,
+        여기서 나오는 fraction이 곧 노드의 사전 dry-run
+        (`_verify_grasp_approach_reachable`)이 보는 값이다.
+        """
+        if not self._cart_client.service_is_ready():
+            if not self._cart_client.wait_for_service(timeout_sec=5.0):
+                return None
+        req = GetCartesianPath.Request()
+        req.header.frame_id = N.BASE_LINK_NAME
+        req.group_name = N.GROUP_NAME
+        req.link_name = N.END_EFFECTOR_NAME
+        req.max_step = N.CARTESIAN_MAX_STEP_M
+        req.jump_threshold = 0.0
+        req.avoid_collisions = True
+
+        state = RobotState()
+        state.joint_state.name = list(N.JOINT_NAMES)
+        state.joint_state.position = list(from_joints)
+        state.is_diff = False
+        req.start_state = state
+
+        goal = PoseStamped()
+        goal.header.frame_id = N.BASE_LINK_NAME
+        (goal.pose.position.x, goal.pose.position.y,
+         goal.pose.position.z) = best['flange']
+        (goal.pose.orientation.x, goal.pose.orientation.y,
+         goal.pose.orientation.z, goal.pose.orientation.w) = best['quat']
+        req.waypoints = [goal.pose]
+
+        fut = self._cart_client.call_async(req)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=15.0)
+        res = fut.result()
+        if res is None:
+            return None
+        return {'fraction': res.fraction, 'trajectory': res.solution,
+                'points': len(res.solution.joint_trajectory.points)}
+
+    def animate_trajectory(self, traj, seconds, repeats, fps=25.0):
+        """궤적을 **스크립트가 직접** 한 프레임씩 그린다.
+
+        왜 RViz Trajectory 디스플레이에 맡기지 않는가 — 재생 속도를 그쪽 설정
+        (`State Display Time`)이 정하는데, 그 값이 이 MoveIt(2.12.4)에서는
+        `0.5x` / `0.05s` / `0.1s` / `0.5s` 형식이고 **파싱에 실패하면 조용히
+        기본값 `3x`로 되돌아간다.** 실제로 `REALTIME`(다른 버전의 표기)을 써서
+        계속 3배속으로 재생되고 있었고, 설정을 바꿔도 안 바뀌는 것처럼 보였다.
+
+        관절값을 직접 보간해서 DisplayRobotState로 쏘면 재생 속도도 반복 횟수도
+        **파이썬 쪽 숫자 두 개**가 되어 RViz 설정과 무관해진다. 궤적이 28~44점
+        뿐이라 그대로 재생하면 뚝뚝 끊기므로, 시간축으로 선형 보간해 fps로 채운다.
+
+        중간에 rclpy를 계속 돌려 준다 — 이 동안 발행이 멈추면 RViz가 갱신되지 않는다.
+        """
+        pts = traj.joint_trajectory.points
+        names = list(traj.joint_trajectory.joint_names)
+        if not pts or seconds <= 0:
+            return
+        times = [p.time_from_start.sec + p.time_from_start.nanosec * 1e-9
+                 for p in pts]
+        span = times[-1] or 1.0
+        msg = DisplayRobotState()
+        msg.state.joint_state.name = names
+        msg.state.is_diff = False
+
+        n_frames = max(2, int(seconds * fps))
+        for _ in range(max(1, repeats)):
+            t0 = time.time()
+            for f in range(n_frames + 1):
+                want = f / n_frames * span
+                # want가 든 구간을 찾아 선형 보간
+                i = 0
+                while i < len(times) - 2 and times[i + 1] < want:
+                    i += 1
+                lo, hi = times[i], times[i + 1]
+                u = 0.0 if hi <= lo else (want - lo) / (hi - lo)
+                msg.state.joint_state.position = [
+                    a + (b - a) * u
+                    for a, b in zip(pts[i].positions, pts[i + 1].positions)]
+                msg.state.joint_state.header.stamp = \
+                    self.get_clock().now().to_msg()
+                self._state_pub.publish(msg)
+                # 프레임 목표 시각까지 rclpy를 돌리며 기다린다
+                target = t0 + (f + 1) / n_frames * seconds
+                while time.time() < target:
+                    rclpy.spin_once(self, timeout_sec=0.005)
+
+    def publish_trajectory(self, response_trajectory, display_seconds=0.0):
+        """계획 궤적을 RViz에 발행한다. 돌려주는 값은 **재생에 걸릴 초**다.
+
+        display_seconds > 0이면 모든 웨이포인트의 time_from_start를 다시 스케일해
+        **어느 궤적이든 정확히 그 초만큼** 재생되게 만든다.
+
+        왜 "배속"이 아니라 "고정 길이"인가 — 실측해 보니 계획 궤적의
+        time_from_start 총합이 목표마다 **2.8초에서 21.4초까지** 널뛴다(점 개수는
+        28~37로 거의 같은데도). MoveIt의 시간 파라미터화가 관절 이동량에 따라
+        길이를 정하기 때문이다. 그래서 배율로 조절하면 편차가 그대로 곱해져서,
+        어떤 목표는 한 번 재생되고 어떤 목표는 열댓 번 반복된다 —
+        **배속을 바꿔도 체감이 안 바뀌는 이유가 이것이었다.**
+
+        길이를 통일하면 목표끼리 재생 속도가 같아져 비교가 되고, 반복 횟수도
+        예측 가능해진다. 계획만 하고 실행은 안 하므로 시간을 바꿔도 안전과는
+        무관하다.
+
+        **전제: RViz의 Trajectory > State Display Time이 `REALTIME`이어야 한다.**
+        고정값("0.05 s" 등)으로 두면 RViz가 time_from_start를 무시하고
+        점 개수 x 그 값으로 재생하므로 이 조절이 통하지 않는다.
+        """
+        traj = response_trajectory
+        pts = traj.joint_trajectory.points
+        if display_seconds > 0 and pts:
+            import copy
+            traj = copy.deepcopy(traj)
+            pts = traj.joint_trajectory.points
+            last = pts[-1].time_from_start
+            total = last.sec + last.nanosec * 1e-9
+            # 총합이 0인 궤적(시간 파라미터화 실패)은 균등 간격으로 깔아 준다.
+            for i, pt in enumerate(pts):
+                if total > 0:
+                    cur = pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
+                    t = cur / total * display_seconds
+                else:
+                    t = (i / max(1, len(pts) - 1)) * display_seconds
+                pt.time_from_start.sec = int(t)
+                pt.time_from_start.nanosec = int((t - int(t)) * 1e9)
         msg = DisplayTrajectory()
         msg.model_id = 'firefighter'
         msg.trajectory_start = self._look_pose_state()
-        msg.trajectory = [response_trajectory]
+        msg.trajectory = [traj]
         self._display_pub.publish(msg)
+        if display_seconds > 0:
+            return display_seconds
+        last = pts[-1].time_from_start if pts else None
+        return (last.sec + last.nanosec * 1e-9) if last else 0.0
 
     def publish_markers(self, dets, current_index=None, status_by_index=None):
         """검출 토마토를 구로 표시한다. 영상에서 "무엇을 향해 가는지"가 보여야
@@ -205,6 +370,103 @@ class PlanProbe(Node):
             alpha = 1.0 if i == current_index else 0.65
             m.color = ColorRGBA(r=cr, g=cg, b=cb, a=alpha)
             array.markers.append(m)
+        self._marker_pub.publish(array)
+
+    # 라벨을 놓는 자리(g_base)와 줄 높이(m). --label-pos / --label-scale로 덮어쓴다.
+    #
+    # 자리를 두 번 옮겼다. 처음엔 베드 바로 위(0.25, 0, 0.52) — 카메라를 돌리면
+    # 글자가 열매 사이로 들어갔다. 다음엔 월드 바깥 위쪽(0.10, -0.34, 0.46) —
+    # 이번엔 너무 멀어서 무엇에 대한 설명인지 연결이 안 됐다. 지금은
+    # **베드 옆구리**다. 베드가 x≈0.25, y −0.07~+0.09, z 0.16~0.36이므로
+    # 열매와는 안 겹치면서 시선 안에 같이 들어온다.
+    LABEL_ANCHOR = (0.26, -0.21, 0.30)
+    # 글자 높이(m)와 줄 간격 배수.
+    #
+    # **RViz MovableText는 글자를 `2 x scale.z` 높이로 그린다**(바이너리
+    # 역어셈블로 확인: calculateTotalDimensionsForPositioning이 char_height_를
+    # 두 배로 쓴다). 즉 scale.z=0.012는 실제 24mm다. 그런데 줄 간격을
+    # 0.012*1.25=15mm로 줬으니 **줄이 9mm씩 겹쳐서** 5줄이 뭉개졌다 —
+    # "텍스트가 흩어져 보인다"의 실제 원인이 이것이었다.
+    # LABEL_LINE_GAP은 반드시 **2.0 이상**이어야 줄이 안 겹친다.
+    #
+    # 폰트 자체는 정상이다(Ogre.log에 'Liberation SansTexture' 512x256 생성
+    # 확인). 다만 fontdef에 code_points가 없어 아틀라스가 33~166만 담으므로
+    # **라벨은 ASCII로만 쓸 것** — 한글이나 `°`(176), `·`(183)를 넣으면
+    # 글리프가 없어 폭이 1.0(정사각)으로 잡히고 글자는 안 보인다.
+    LABEL_SCALE = 0.025            # 실제 글자 높이 = 이 값 x 2 = 50mm
+    LABEL_LINE_GAP = 2.4           # 줄 간격 = 글자 높이(2x) x 1.2
+
+    def publish_status_label(self, lines, rgb=(1.0, 1.0, 1.0), target_xyz=None):
+        """씬 옆에 상태 텍스트를 띄운다 — 화면만 보고도 지금 무엇을 보는지 알게.
+
+        터미널을 같이 안 보면 **지금 화면의 궤적이 어느 시작 자세·어느 목표의
+        것인지** 알 수 없다. 영상으로 녹화하면 터미널이 아예 안 남으므로 더 그렇다.
+
+        마커 ns를 'label'로 따로 둬서 publish_markers(ns='tomatoes')와 섞이지
+        않게 한다 — RViz는 ns+id로 마커를 관리하므로 서로를 지우지 않는다.
+
+        J1 도달각과 분기(A/B)를 같이 띄운다. armed pose의 이득이 상당 부분
+        "B분기를 덜 고르게 되는 것"에서 나오므로(docs/ARMED_POSE_HANDOFF.md
+        5.3절의 A/B 열), 궤적만 봐서는 그게 안 보인다.
+
+        target_xyz를 주면 라벨에서 그 목표까지 **지시선**을 긋는다. 텍스트가
+        공간에 떠 있기만 하면 어느 열매를 설명하는지 알 수 없기 때문이다
+        (현재 목표를 1.6배로 그리는 것만으로는 부족하다는 것이 실사용에서 드러났다).
+        """
+        array = MarkerArray()
+        ax, ay, az = self.LABEL_ANCHOR
+        stamp = self.get_clock().now().to_msg()
+
+        # **줄마다 마커를 따로 만든다.** 하나의 마커에 '\n'으로 넣으면 줄 간격을
+        # RViz(MovableText)가 정하는데, 그 간격이 글자 높이에 비해 크게 잡혀
+        # 다섯 줄이 세로로 한참 벌어진다 — "텍스트가 공간에 흩어져 있다"는 지적이
+        # 두 번 나온 원인이 이것이었다. 줄마다 위치를 주면 간격이 우리 숫자가 된다.
+        # 글자 실제 높이가 2*scale.z이므로 간격도 그 기준으로 잡는다.
+        step = self.LABEL_SCALE * self.LABEL_LINE_GAP
+        for i, line in enumerate(lines):
+            m = Marker()
+            m.header.frame_id = N.BASE_LINK_NAME
+            m.header.stamp = stamp
+            m.ns = 'label'
+            m.id = 10 + i
+            m.type = Marker.TEXT_VIEW_FACING
+            m.action = Marker.ADD
+            m.pose.position.x = ax
+            m.pose.position.y = ay
+            m.pose.position.z = az - i * step
+            m.pose.orientation.w = 1.0
+            m.scale.z = self.LABEL_SCALE
+            m.color = ColorRGBA(r=rgb[0], g=rgb[1], b=rgb[2], a=1.0)
+            m.text = line
+            array.markers.append(m)
+        # 줄 수가 줄었을 때 옛 줄이 남지 않게 지운다(RViz는 ns+id로 기억한다).
+        for i in range(len(lines), 10):
+            m = Marker()
+            m.header.frame_id = N.BASE_LINK_NAME
+            m.header.stamp = stamp
+            m.ns = 'label'
+            m.id = 10 + i
+            m.action = Marker.DELETE
+            array.markers.append(m)
+
+        leader = Marker()
+        leader.header.frame_id = N.BASE_LINK_NAME
+        leader.header.stamp = stamp
+        leader.ns = 'label'
+        leader.id = 1
+        leader.type = Marker.LINE_STRIP
+        if target_xyz is None:
+            leader.action = Marker.DELETE
+        else:
+            leader.action = Marker.ADD
+            leader.scale.x = 0.003          # 선 두께
+            leader.color = ColorRGBA(r=rgb[0], g=rgb[1], b=rgb[2], a=0.55)
+            leader.pose.orientation.w = 1.0
+            p0 = Point(); p0.x, p0.y, p0.z = ax, ay, az - len(lines) * step
+            p1 = Point(); p1.x, p1.y, p1.z = target_xyz
+            leader.points = [p0, p1]
+        array.markers.append(leader)
+
         self._marker_pub.publish(array)
 
     def _on_js(self, msg):
@@ -373,12 +635,86 @@ class PlanProbe(Node):
             'points': len(traj.points),
             'j1_deg': math.degrees(j1_final),
             'travel_deg': math.degrees(sum(travel)),
+            # 관절별 이동량. J6(flange 자전)만 따로 보려고 넣었다 —
+            # 합만 보면 "플랜지가 180도 도는" 비용이 다른 축에 묻힌다.
+            'travel_by_joint': {n: math.degrees(travel[idx[n]]) for n in names},
             'final': {n: final[idx[n]] for n in names},
             'peak': {n: max(abs(p.positions[idx[n]]) for p in traj.points) for n in names},
         }
 
 
-def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0):
+def _concat(traj_a, traj_b):
+    """궤적 둘을 이어 붙인다(재생용).
+
+    관절 순서가 서비스마다 다르게 올 수 있으므로 **이름으로 매핑해 재배열**한다.
+    그냥 붙이면 이어지는 순간 팔이 튀는 그림이 된다.
+    시간축은 animate_trajectory가 다시 정규화하므로 순서만 맞으면 된다.
+    """
+    import copy
+    out = copy.deepcopy(traj_a)
+    names_a = list(out.joint_trajectory.joint_names)
+    jt_b = traj_b.joint_trajectory
+    try:
+        idx = [jt_b.joint_names.index(n) for n in names_a]
+    except ValueError:
+        return out
+    last = out.joint_trajectory.points[-1].time_from_start
+    base_t = last.sec + last.nanosec * 1e-9
+    for pt in jt_b.points[1:]:
+        new_pt = copy.deepcopy(out.joint_trajectory.points[-1])
+        new_pt.positions = [pt.positions[i] for i in idx]
+        new_pt.velocities = []
+        new_pt.accelerations = []
+        t = base_t + pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
+        new_pt.time_from_start.sec = int(t)
+        new_pt.time_from_start.nanosec = int((t - int(t)) * 1e9)
+        out.joint_trajectory.points.append(new_pt)
+    return out
+
+
+def _spin(results):
+    """성공한 계획 중 J6(flange 자전) 이동량의 최솟값. 실패뿐이면 무한대."""
+    good = [r for r in results if r['ok']]
+    return min((r['travel_by_joint'][N.JOINT_NAMES[5]] for r in good),
+               default=float('inf'))
+
+
+def _label_lines(pose_label, index, total, d, results):
+    """화면 라벨 문구.
+
+    **공백(스페이스)을 쓰지 말 것. 이게 이 라벨의 유일한 함정이다.**
+
+    Ogre 폰트 아틀라스의 기본 코드포인트 범위는 33~166인데 스페이스는 **32**라
+    빠져 있다. MovableText는 스페이스 폭을
+        space_width = getGlyphAspectRatio(0x20) * char_height * 2
+    로 잡는데, 없는 글리프는 aspect 1.0을 돌려주므로 **공백 하나가
+    2 * scale.z (지금 값으로 50mm)** 가 된다. 그래서 한 줄 안의 단어들이
+    월드를 가로질러 흩어졌다 — "armed"와 "pose"가 멀리 떨어져 보이던 것이
+    전부 이것이었다. 줄 간격도 글자 크기도 한글도 원인이 아니었다.
+
+    구분자는 `_` (95), `:` (58), `/` (47) 처럼 **33~166 안의 문자**로 쓴다.
+    같은 이유로 `°`(176)·`·`(183)·en-dash도 금지다.
+    """
+    good = [r for r in results if r['ok']]
+    cls = d.get('class_name', '?')[:4]
+    head = [pose_label.replace(' ', '_'),
+            f'#{index+1}/{total}:{cls}:z{d["base_z"]:.2f}']
+    if not good:
+        return head + ['UNREACHABLE'], (0.95, 0.35, 0.35)
+    best = min(good, key=lambda r: (r['travel_by_joint'][N.JOINT_NAMES[5]],
+                                    r['travel_deg']))
+    is_a = abs(best['j1_deg']) < 80
+    rgb = (0.45, 0.8, 1.0) if is_a else (1.0, 0.62, 0.2)
+    j6 = best['travel_by_joint'][N.JOINT_NAMES[5]]
+    return head + [
+        f'trv{best["travel_deg"]:.0f}:J1{best["j1_deg"]:+.0f}',
+        f'J6:{j6:.0f}:{"A" if is_a else "B-wrap"}:{len(good)}/{len(results)}',
+    ], rgb
+
+
+def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0,
+                 pose_label='look pose', display_seconds=3.0, display_repeats=3,
+                 roll_symmetry=False, straight_in=False):
     """모든 목표를 repeat회씩 플래닝하고 행 목록을 돌려준다.
 
     display_pause > 0이면 목표마다 계획 궤적을 /display_planned_path로 발행하고
@@ -398,14 +734,67 @@ def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0):
             continue
         if display_pause > 0:
             node.publish_markers(dets, index, status)
-        results = [node.plan_to(best['align'], best['quat']) for _ in range(repeat)]
+        # [2026-08-01] 그리퍼는 2지 평행이라 **roll과 roll+180도가 물리적으로
+        # 같은 자세**인데, 목표를 완전한 orientation으로 주면 플래너는 그걸
+        # 모르고 고정된 roll을 맞추려 J6를 반 바퀴 돌린다(RViz에서 "플랜지가
+        # 180도 회전"으로 보이던 것). 둘 다 풀어 보고 싼 쪽을 쓴다.
+        # 실측: J6 이동량 중앙 166 -> 14도, 전체 502 -> 375도
+        # (scripts/eval_roll_symmetry.py).
+        rolls = [best['quat']]
+        if roll_symmetry:
+            rolls.append(N._compute_look_at_quat_xyzw(best['fwd'],
+                                                      roll_rad=math.pi))
+        results = [node.plan_to(best['align'], rolls[0]) for _ in range(repeat)]
+        if roll_symmetry:
+            alt = [node.plan_to(best['align'], rolls[1]) for _ in range(repeat)]
+            # **J6 이동량으로 고른다.** 처음엔 6축 합으로 골랐는데, 원하는 것은
+            # "플랜지가 안 도는 것"이라 기준이 달랐다. 둘은 대개 일치하지만
+            # (싼 roll이 대체로 J6도 적다) 어긋나는 목표가 남아서, 화면에서는
+            # 그 목표들만 계속 반 바퀴 도는 것으로 보였다.
+            if _spin(alt) < _spin(results):
+                results = alt
+        # [3/5] 직진 접근은 **표시와 무관하게** 재야 한다 — standoff를 바꾸면
+        # 이 fraction이 노드의 사전 dry-run 통과 여부를 결정하기 때문이다.
+        cart_fraction = None
+        good_now = [r for r in results if r['ok']]
+        if straight_in and good_now:
+            pick = min(good_now,
+                       key=lambda r: (r['travel_by_joint'][N.JOINT_NAMES[5]],
+                                      r['travel_deg']))
+            cart = node.plan_straight_in(
+                [pick['final'][n] for n in N.JOINT_NAMES], best)
+            if cart:
+                cart_fraction = cart['fraction']
+                cart_traj = cart['trajectory']
         if display_pause > 0:
             ok_results = [r for r in results if r['ok']]
             status[index] = 'ok' if ok_results else 'fail'
+            hold = display_pause
             if ok_results:
-                node.publish_trajectory(ok_results[-1]['trajectory'])
+                # 반복 중 **이동량이 가장 적은** 궤적을 보여준다. 예전에는
+                # 마지막 것을 띄웠는데, 그러면 같은 목표가 회차마다 A분기/B분기를
+                # 오가며 다르게 보여 "무엇이 이 자세의 결과인지"가 안 잡힌다.
+                # 최소를 고르는 것은 Phase 3이 적용된 상태와도 일치한다.
+                # 보여줄 궤적도 J6 최소 기준(라벨과 같은 해를 그려야 한다).
+                shown = min(ok_results,
+                            key=lambda r: (r['travel_by_joint'][N.JOINT_NAMES[5]],
+                                           r['travel_deg']))
+                show_traj = shown['trajectory']
+                # 위에서 계획해 둔 직진 구간을 이어 붙인다 — 이게 있어야
+                # 화면으로 "어느 방향에서 진입하는가"를 판단할 수 있다.
+                if cart_fraction and cart_fraction > 0.0:
+                    show_traj = _concat(show_traj, cart_traj)
+                node.publish_trajectory(show_traj, display_seconds)
             node.publish_markers(dets, index, status)
-            t_end = time.time() + display_pause
+            lines, rgb = _label_lines(pose_label, index, len(dets), d, results)
+            node.publish_status_label(
+                lines, rgb, (d['base_x'], d['base_y'], d['base_z']))
+            # 애니메이션을 우리가 직접 돌린다(animate_trajectory 주석). 재생
+            # 시간 x 반복 횟수가 그대로 이 목표에 머무는 시간이 된다.
+            if ok_results:
+                node.animate_trajectory(shown['trajectory'],
+                                        display_seconds, display_repeats)
+            t_end = time.time() + hold
             while time.time() < t_end:
                 rclpy.spin_once(node, timeout_sec=0.05)
         good = [r for r in results if r['ok']]
@@ -430,10 +819,16 @@ def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0):
         if verbose:
             j1_txt = (f'J1 {row["j1_min_deg"]:.0f}~{row["j1_max_deg"]:.0f}°'
                       if j1 else 'J1 —')
+            # J6(flange 자전)를 같이 찍는다. 6축 합에 묻혀서 "플랜지가 180도
+            # 도는" 목표를 로그만으로는 못 찾았다.
+            spin = _spin(results)
+            spin_txt = f'J6 {spin:.0f}°' if spin != float('inf') else 'J6 —'
+            frac_txt = ('' if cart_fraction is None
+                        else f'  직진 {100*cart_fraction:.0f}%')
             print(f'{d.get("class_name", "?"):<8} z={d["base_z"]:.3f}  '
-                  f'성공 {len(good)}/{repeat}  {j1_txt}  '
+                  f'성공 {len(good)}/{repeat}  {j1_txt}  {spin_txt}  '
                   f'이동량 {row["travel_mean_deg"] or 0:.0f}°±{row["travel_sd_deg"]:.0f}  '
-                  f'플래닝 {row["plan_s_mean"] or 0:.2f}s')
+                  f'플래닝 {row["plan_s_mean"] or 0:.2f}s' + frac_txt)
     return rows
 
 
@@ -559,6 +954,37 @@ def main():
                         '0이면 Ctrl+C까지 무한 반복 — RViz Trajectory 디스플레이는 '
                         'Loop Animation이라 그냥 두면 **마지막 궤적만** 계속 '
                         '재생되므로, 전체를 다시 보려면 이 옵션이 필요하다')
+    # [2026-08-02] standoff를 인자로 뺀 이유: 이 값을 바꾸면 정렬 위치가
+    # 베이스 쪽으로 당겨져 MIN_ALIGN_RADIUS_M 경계에 붙는 목표가 생기는데,
+    # 그 대가를 노드 상수를 고쳐가며 재면 다른 변경과 섞인다. 한 번에 하나만
+    # 바꿔 비교할 수 있어야 한다.
+    p.add_argument('--standoff', type=float, default=None, metavar='M',
+                   help='APPROACH_STANDOFF_M을 이 값으로 덮어쓴다(m). '
+                        '기본은 노드 상수 그대로')
+    p.add_argument('--straight-in', action='store_true',
+                   help='[3/5] 직진 접근을 정렬 궤적 뒤에 이어 붙여 같이 재생하고 '
+                        'Cartesian fraction을 찍는다. 이게 없으면 화면에 보이는 '
+                        '것은 OMPL 자유공간 경로뿐이라 접근 방향을 판단할 수 없다')
+    p.add_argument('--roll-symmetry', action='store_true',
+                   help='그리퍼의 180도 대칭을 이용한다. roll 0과 roll 180을 둘 다 '
+                        '풀어 보고 이동량이 적은 쪽을 쓴다 — 물리적으로 같은 자세라 '
+                        '공짜다. scripts/eval_roll_symmetry.py 참고')
+    p.add_argument('--display-seconds', type=float, default=3.0, metavar='SEC',
+                   help='궤적 재생 1회에 걸릴 시간(초). **모든 목표를 이 길이로 '
+                        '통일**한다 — 계획 궤적의 원래 길이는 목표마다 2.8~21.4초로 '
+                        '널뛰어서 그대로 두면 속도 비교가 안 된다. 크게 줄수록 느리다. '
+                        '0이면 계획된 시간 그대로. '
+                        'RViz의 Trajectory > State Display Time이 REALTIME이어야 한다')
+    p.add_argument('--display-repeats', type=int, default=3, metavar='N',
+                   help='목표마다 궤적을 몇 번 반복 재생할지. '
+                        '정지 시간 = --display-seconds x 이 값')
+    p.add_argument('--label-scale', type=float, default=None, metavar='M',
+                   help='화면 라벨 글자 높이(m). 기본 0.012. 월드 좌표라 크게 주면 '
+                        '글자가 씬을 덮는다')
+    p.add_argument('--label-pos', nargs=3, type=float, default=None,
+                   metavar=('X', 'Y', 'Z'),
+                   help='화면 라벨 위치(g_base, m). 기본은 베드 옆구리 '
+                        '(0.26, -0.21, 0.30)')
     p.add_argument('--display-pause', type=float, default=0.0,
                    help='>0이면 목표마다 계획 궤적을 /display_planned_path로 '
                         '발행하고 이 초만큼 대기 — RViz 확인·영상 녹화용. '
@@ -574,6 +1000,20 @@ def main():
                    help='이 값들로 방향 허용오차를 훑으며 성공률 곡선을 만든다'
                         ' (예: --sweep-orientation-deg 2 4 6 8 10 12 15)')
     p.add_argument('--targets', default='bags/lab_bed_detections.json')
+    # [2026-08-01] 씬에 장애물을 넣는 두 옵션. 안 주면 **빈 씬**이고, 그러면
+    # 뚫고 가는 경로가 성공으로 잡힌다(2절 함정 3 — 세 번 데였다).
+    p.add_argument('--tomatoes', action='store_true',
+                   help='검출 열매를 구 collision object로 넣고 ACM을 푼다')
+    # [2026-08-02] octomap 쪽 ACM 완화. 열매(구)에는 --tomatoes가 이미 걸어
+    # 주는데 octomap에는 안 걸고 있었다. 이걸 켜고 잰 값과 끄고 잰 값을
+    # **섞어 보고하는 사고**를 한 번 냈으므로, 반드시 옵션으로 드러나게 둔다.
+    p.add_argument('--octomap-acm', action='store_true',
+                   help='그리퍼/손목/flange가 octomap voxel과 충돌해도 되게 한다. '
+                        '팔뚝(joint2~4)은 그대로 금지. '
+                        '실측: 정렬 70->100%%, 직진 fraction>=0.95가 3/13->14/15')
+    p.add_argument('--octomap', default=None, metavar='FILE',
+                   help='녹화 장면 octomap을 주입한다(octomap_io.py capture 결과). '
+                        '줄기·지지대·잎이 여기 들어 있다')
     p.add_argument('--repeat', type=int, default=5,
                    help='목표당 반복 횟수. OMPL이 확률적이라 신뢰도 측정에 필요')
     p.add_argument('--planning-time', type=float, default=2.0)
@@ -589,6 +1029,11 @@ def main():
 
     POSITION_TOLERANCE_M = args.position_tolerance
     ORIENTATION_TOLERANCE_RAD = args.orientation_tolerance
+    if args.standoff is not None:
+        # select_approach가 N._waypoints_along_forward를 거쳐 이 상수를 읽는다.
+        print(f'standoff 덮어쓰기: {N.APPROACH_STANDOFF_M*1000:.0f}mm -> '
+              f'{args.standoff*1000:.0f}mm')
+        N.APPROACH_STANDOFF_M = args.standoff
     print(f'\n허용오차: 위치 {POSITION_TOLERANCE_M*1000:.0f}mm, '
           f'방향 {math.degrees(ORIENTATION_TOLERANCE_RAD):.1f}°')
 
@@ -607,23 +1052,85 @@ def main():
         rclpy.shutdown()
         raise SystemExit(1)
 
+    # 씬 구성. 이 두 줄이 있느냐 없느냐로 수치가 크게 달라지므로 항상 출력한다.
+    scene_label = '빈 씬'
+    if args.tomatoes or args.octomap:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import scene_objects
+        parts = []
+        if args.tomatoes:
+            scene_objects.publish_tomatoes(node, dets)
+            scene_objects.allow_gripper_tomato_collisions(node, dets)
+            parts.append(f'열매 {len(dets)}개(구)+ACM')
+        if args.octomap:
+            import octomap_io
+            from moveit_msgs.msg import PlanningScene
+            owp = octomap_io.load_octomap_file(args.octomap)
+            octomap_io.inject_octomap(node, rclpy, PlanningScene, owp)
+            leaves = octomap_io.decode_msg(owp.octomap)
+            octomap_io.summarize(leaves, owp.octomap.resolution,
+                                 label=f'octomap({args.octomap}): ')
+            parts.append(f'octomap voxel {len(leaves)}개')
+            # **항상 호출한다(끌 때도).** ACM은 move_group의 planning scene에
+            # 붙어 있어 스크립트가 죽어도 남는다. 앞 실행이 kill -9로 끝나
+            # teardown을 못 돌면 완화가 그대로 살아 있고, 다음 실행이 그걸
+            # 물려받아 **끈 줄 알고 켠 상태로 재는 사고**가 난다(실제로 겪었다).
+            # verify 쪽도 ACM은 안 보므로 여기서 명시적으로 맞춰 두는 수밖에 없다.
+            scene_objects.allow_gripper_octomap_collisions(
+                node, args.octomap_acm, quiet=not args.octomap_acm)
+            if args.octomap_acm:
+                parts.append('octomap ACM 완화')
+            else:
+                parts.append('octomap ACM 완화 없음')
+        scene_label = ' + '.join(parts)
+    print(f'\n씬: {scene_label}')
+
+    def teardown():
+        """씬을 원래대로 되돌린다.
+
+        안 되돌리면 **다음 측정이 남은 장애물을 모른 채** 돌아간다 — 이게
+        바로 함정 3이 생기는 경로다. 어느 종료 경로로 나가든 지나가게 둔다.
+        """
+        if args.tomatoes:
+            scene_objects.publish_tomatoes(node, dets, remove=True)
+        if args.octomap:
+            if args.octomap_acm:
+                scene_objects.allow_gripper_octomap_collisions(
+                    node, False, quiet=True)
+            octomap_io.clear_octomap(node, rclpy)
+        node.destroy_node()
+        rclpy.shutdown()
+
     print(f'\n목표 {len(dets)}개 x 반복 {args.repeat}회 '
           f'(플래닝 시간 {args.planning_time}s, 시도 {args.attempts}회)')
-    pose_label = 'look pose' if not args.start_pose else \
-        '[' + ', '.join(f'{v:+.1f}' for v in args.start_pose) + ']°'
+    # 노드가 쓰는 상수와 대조해 이름을 붙인다. 화면 라벨에 관절값 6개가 뜨면
+    # "지금 보고 있는 게 armed pose인가"를 읽어낼 수 없다.
+    def _pose_label(start_pose_deg):
+        if not start_pose_deg:
+            return 'look pose'
+        rad = [math.radians(v) for v in start_pose_deg]
+        for name, ref in (('look pose', N.LOOK_POSE_JOINT_POSITIONS),
+                          ('armed pose', N.ARMED_POSE_JOINT_POSITIONS)):
+            if all(abs(a - b) < 1e-3 for a, b in zip(rad, ref)):
+                return name
+        return '[' + ', '.join(f'{v:+.1f}' for v in start_pose_deg) + ']°'
+
+    pose_label = _pose_label(args.start_pose)
+    if args.label_scale is not None:
+        node.LABEL_SCALE = args.label_scale
+    if args.label_pos is not None:
+        node.LABEL_ANCHOR = tuple(args.label_pos)
     print(f'시작 자세: {pose_label} 고정 / 측정 구간: 시작 자세 -> 정렬 위치\n')
 
     if args.collect_solutions:
         collect_solutions(node, dets, args.repeat, args.collect_solutions)
-        node.destroy_node()
-        rclpy.shutdown()
+        teardown()
         return
 
     if args.sweep_orientation_deg:
         run_tolerance_sweep(node, dets, args.repeat,
                             args.sweep_orientation_deg, args.csv)
-        node.destroy_node()
-        rclpy.shutdown()
+        teardown()
         return
 
     if args.display_pause > 0:
@@ -641,14 +1148,21 @@ def main():
                          else f'{round_no}/{args.display_loop}회차')
                 print(f'\n===== {label} =====')
                 rows = evaluate_all(node, dets, args.repeat,
-                                    display_pause=args.display_pause)
+                                    display_pause=args.display_pause,
+                                    pose_label=pose_label,
+                                    display_seconds=args.display_seconds,
+                                    display_repeats=args.display_repeats,
+                                    roll_symmetry=args.roll_symmetry,
+                                    straight_in=args.straight_in)
                 # 다음 회차 전에 마커 색을 초기화한다 — 안 그러면 전부 초록/회색인
                 # 채로 시작해 "지금 어디를 보고 있는지"가 안 보인다.
                 node.publish_markers(dets)
         except KeyboardInterrupt:
             print(f'\n중단 — {round_no}회차까지 실행함')
     else:
-        rows = evaluate_all(node, dets, args.repeat)
+        rows = evaluate_all(node, dets, args.repeat,
+                            roll_symmetry=args.roll_symmetry,
+                            straight_in=args.straight_in)
 
     planned = [r for r in rows if r.get('trials')]
     total_trials = sum(r['trials'] for r in planned)
@@ -682,8 +1196,7 @@ def main():
             w.writerows(rows)
         print(f'\nCSV 저장: {args.csv} ({len(rows)}행)')
 
-    node.destroy_node()
-    rclpy.shutdown()
+    teardown()
 
 
 if __name__ == '__main__':

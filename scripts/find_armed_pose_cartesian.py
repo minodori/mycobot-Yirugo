@@ -28,8 +28,14 @@
 한계 (반드시 알고 볼 것)
 -----------------------
 씬에 넣는 것은 **토마토 열매뿐**이다. 줄기·지지대·잎은 형상을 모르므로 빠져
-있다. 즉 여기 수치는 여전히 낙관적이다. 실물 적용 전에는 녹화된 장면의
-octomap을 주입해 재확인해야 한다.
+있다. 즉 여기 수치는 낙관적이다.
+
+**[2026-08-01] 그 재확인을 했다** — `eval_bed_scene.py`가 녹화 장면의 octomap을
+주입해 다시 쟀고, 결과는 `docs/ARMED_POSE_HANDOFF.md` 5절이다. 요약:
+채택한 armed pose의 **상대 우위는 유지된다**(look pose 대비 -9%). 다만 성공률이
+100%에서 77.8%로 떨어지므로, **여기서 나오는 "성공률 100%"는 이 씬 한정**이라는
+점을 기억할 것. 후보를 고르는 용도로는 여전히 유효하지만(모든 후보가 같은 씬에서
+평가되므로 순위는 공정하다), 절대값을 인용하면 안 된다.
 
 사용법
 ------
@@ -53,112 +59,24 @@ print = functools.partial(print, flush=True)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import rclpy
-from geometry_msgs.msg import Pose
-from moveit_msgs.msg import CollisionObject, PlanningScene
-from shape_msgs.msg import SolidPrimitive
 import sweep_targets_planned as S
 from sweep_targets_planned import PlanProbe, select_approach
 from mycobot_280_pick import coord_to_goal_node as N
 
-TOMATO_OBJECT_PREFIX = 'tomato_'
-# 검출 반지름에 더할 여유(m). YOLO 추정 반지름은 13~18mm인데, depth 오차와
-# 열매가 흔들릴 여지를 감안해 키운다. 너무 키우면 접근 자체가 막히므로
-# 정렬 standoff(2cm)보다는 작게 둔다.
-TOMATO_MARGIN_M = 0.010
+# 씬을 만드는 코드는 scene_objects로 옮겼다 — octomap 재검증
+# (eval_bed_scene.py)도 **똑같은 씬**을 만들어야 두 측정이 비교되기 때문이다.
+# 이름은 그대로 두어 기존 호출부가 깨지지 않게 한다.
+from scene_objects import (  # noqa: F401
+    TOMATO_MARGIN_M,
+    TOMATO_OBJECT_PREFIX,
+    allow_gripper_tomato_collisions,
+    publish_tomatoes,
+    tip_clearance,
+)
 
 # armed pose가 지켜야 할 최소 여유(m). flange 기준이 아니라 **그리퍼 끝단**
 # 기준이다 — 손가락이 flange에서 GRIPPER_LENGTH_OFFSET_M(9cm) 앞으로 나간다.
 MIN_TIP_CLEARANCE_M = 0.08
-
-
-def publish_tomatoes(node, dets, remove=False):
-    """토마토를 구 collision object로 씬에 넣는다. ACM은 건드리지 않는다."""
-    scene = PlanningScene()
-    scene.is_diff = True
-    for i, d in enumerate(dets):
-        obj = CollisionObject()
-        obj.header.frame_id = N.BASE_LINK_NAME
-        obj.id = f'{TOMATO_OBJECT_PREFIX}{i}'
-        obj.operation = CollisionObject.REMOVE if remove else CollisionObject.ADD
-        if not remove:
-            prim = SolidPrimitive()
-            prim.type = SolidPrimitive.SPHERE
-            prim.dimensions = [float(d.get('radius_m', 0.017)) + TOMATO_MARGIN_M]
-            pose = Pose()
-            pose.position.x, pose.position.y, pose.position.z = (
-                d['base_x'], d['base_y'], d['base_z'])
-            pose.orientation.w = 1.0
-            obj.primitives = [prim]
-            obj.primitive_poses = [pose]
-        scene.world.collision_objects.append(obj)
-    node._scene_pub.publish(scene)
-    for _ in range(20):
-        rclpy.spin_once(node, timeout_sec=0.05)
-
-
-def allow_gripper_tomato_collisions(node, dets):
-    """그리퍼·손목·flange가 **모든 토마토**와 충돌해도 되게 ACM을 고친다.
-
-    이걸 안 하면 접근할 토마토 자신과 충돌해 플래닝이 거의 전부 실패한다 —
-    실측 성공률 2~4%였다. coord_to_goal_node가 목표 지점의 target_object에
-    대해 똑같은 처리를 한다(_allow_gripper_target_object_collision, L1352):
-    "그 자리에 등록된 구가 flange 자신과 충돌로 잡혀서 Unable to sample any
-    valid states for goal tree로 매번 실패"했다는 실측 기록이 있고, joint5/
-    joint6도 같은 이유로 허용 목록에 있다.
-
-    **PlanningScene diff의 ACM은 병합이 아니라 통째 대체다.** 부분 발행하면
-    SRDF의 self-collision-disable이 전부 소실되는 사고가 있었다(같은 문서).
-    그래서 반드시 조회 -> 보존 -> 추가 -> 재발행 순서로 한다.
-
-    주의: 이 처리는 "그리퍼가 열매를 스쳐도 된다"는 뜻이다. 팔뚝(joint2~4)은
-    여전히 충돌로 잡히므로, 팔이 베드를 관통하는 경로는 그대로 걸러진다.
-    """
-    from moveit_msgs.msg import AllowedCollisionMatrix, PlanningSceneComponents
-    from moveit_msgs.srv import GetPlanningScene
-
-    if not hasattr(node, '_scene_query'):
-        node._scene_query = node.create_client(GetPlanningScene,
-                                               '/get_planning_scene')
-        node._scene_query.wait_for_service(timeout_sec=10)
-    req = GetPlanningScene.Request()
-    req.components.components = PlanningSceneComponents.ALLOWED_COLLISION_MATRIX
-    fut = node._scene_query.call_async(req)
-    rclpy.spin_until_future_complete(node, fut, timeout_sec=10)
-    acm = fut.result().scene.allowed_collision_matrix
-
-    allowed = (list(N.GRIPPER_LINK_NAMES) + list(N.WRIST_LINK_NAMES)
-               + [N.END_EFFECTOR_NAME])
-    names = list(acm.entry_names)
-    rows = [list(e.enabled) for e in acm.entry_values]
-
-    for i in range(len(dets)):
-        oid = f'{TOMATO_OBJECT_PREFIX}{i}'
-        if oid in names:
-            continue
-        for row in rows:
-            row.append(False)
-        for j, nm in enumerate(names):
-            rows[j][-1] = nm in allowed
-        new_row = [nm in allowed for nm in names]
-        new_row.append(False)
-        names.append(oid)
-        rows.append(new_row)
-
-    updated = AllowedCollisionMatrix()
-    updated.entry_names = names
-    updated.default_entry_names = list(acm.default_entry_names)
-    updated.default_entry_values = list(acm.default_entry_values)
-    from moveit_msgs.msg import AllowedCollisionEntry
-    updated.entry_values = [AllowedCollisionEntry(enabled=r) for r in rows]
-
-    scene = PlanningScene()
-    scene.is_diff = True
-    scene.allowed_collision_matrix = updated
-    node._scene_pub.publish(scene)
-    for _ in range(20):
-        rclpy.spin_once(node, timeout_sec=0.05)
-    print(f'ACM 갱신: 그리퍼/손목/flange {len(allowed)}개 링크 x 토마토 '
-          f'{len(dets)}개 충돌 허용 (팔뚝은 그대로 충돌로 잡힘)')
 
 
 def candidate_pose(radius, azimuth_deg, height, elevation_deg=0.0):
@@ -204,18 +122,6 @@ def tip_clearance_from_joints(pos7, joints, dets):
     return tip_clearance(pos7[:3], pos7[3:], dets)
 
 
-def tip_clearance(pos, quat, dets):
-    """그리퍼 끝단에서 가장 가까운 토마토까지 거리(m).
-
-    끝단 = flange에서 그리퍼 정면(로컬 +Z) 방향으로 GRIPPER_LENGTH_OFFSET_M.
-    쿼터니언에서 정면 축을 뽑아 쓴다(회전행렬 3번째 열).
-    """
-    x, y, z, w = quat
-    fz = (2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y))
-    tip = tuple(p + N.GRIPPER_LENGTH_OFFSET_M * f for p, f in zip(pos, fz))
-    return min(math.dist(tip, (d['base_x'], d['base_y'], d['base_z'])) for d in dets)
-
-
 def main():
     p = argparse.ArgumentParser(description='armed pose 작업공간 기반 재도출')
     p.add_argument('--targets', default='bags/lab_bed_detections.json')
@@ -240,7 +146,6 @@ def main():
 
     rclpy.init()
     node = PlanProbe(2.0, 10)
-    node._scene_pub = node.create_publisher(PlanningScene, '/planning_scene', 10)
     if not node.wait_ready():
         raise SystemExit('move_group 없음')
 

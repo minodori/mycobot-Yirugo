@@ -50,6 +50,7 @@ from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 COLOR_COMPRESSED = '/camera/camera/color/image_raw/compressed'
@@ -76,6 +77,25 @@ def generate_launch_description():
     ld.add_action(DeclareLaunchArgument('use_yolo', default_value='true',
                                         description='false면 검출 재생성을 건너뜀(CPU 절약)'))
     ld.add_action(DeclareLaunchArgument('use_rviz', default_value='true'))
+    # [2026-08-01] 필터 노드의 기본값은 0.5인데, docs/ROSBAG_HANDOFF.md 6.5절이
+    # 그 값이 과하다고 실측해 두었다(마스킹 면적 0.0→11.8% / 0.2→21.7% /
+    # 0.5→31.5%). 넓게 지우면 토마토뿐 아니라 **줄기·지지대까지 octomap에서
+    # 사라진다** — 그것들은 실제로 피해야 할 장애물이다.
+    #
+    # 이 인자가 필요한 이유는 octomap 재검증(docs/ARMED_POSE_HANDOFF.md 5절)
+    # 때문이다. 노드는 이 파라미터를 기동 시 한 번만 읽으므로(ros2 param set으로는
+    # 안 바뀐다) 런치에서 주는 수밖에 없다.
+    #
+    # **낮춘다고 더 보수적인 씬이 되는 게 아니다 — 같은 문서 함정 11.**
+    # 처음엔 "0.2면 줄기가 더 남으니 실물에 가깝겠다"고 봤는데 반대였다.
+    # bbox가 열매를 다 못 덮어 **열매 표면이 octomap voxel로 살아남고**, octomap
+    # voxel에는 ACM 완화가 안 걸리므로 따려는 열매 자신이 회피 대상이 된다.
+    # 실측: 열매 구 안 voxel이 0.5에서 0개, 0.2에서 33개(13/15 토마토).
+    # 성공률 77.8% -> 19.3%. 그 19.3%는 실물이 아니라 측정 인공물이다.
+    ld.add_action(DeclareLaunchArgument(
+        'bbox_padding', default_value='0.5',
+        description='마스킹본 필터의 bbox_padding_ratio. 낮추면 줄기가 더 남지만 '
+                    '열매까지 남는다 — 낮춰 쓰기 전에 함정 11을 읽을 것'))
     ld.add_action(DeclareLaunchArgument(
         'clear_delay', default_value='25.0',
         description=(
@@ -135,7 +155,13 @@ def generate_launch_description():
             package='mycobot_280_pick',
             executable='pointcloud_tomato_filter_node',
             name='pointcloud_tomato_filter_node',
-            parameters=[{'restamp_now': True}],
+            parameters=[{
+                'restamp_now': True,
+                # LaunchConfiguration은 문자열로 풀리므로 value_type을 줘야
+                # 선언된 double 파라미터와 타입이 맞는다.
+                'bbox_padding_ratio': ParameterValue(
+                    LaunchConfiguration('bbox_padding'), value_type=float),
+            }],
         )
     )
     # 비마스킹본: "어느 voxel이 토마토인가"를 눈으로 찾는 용도. points_filtered는
