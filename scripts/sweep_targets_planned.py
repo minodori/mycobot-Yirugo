@@ -1108,6 +1108,12 @@ def main():
     p.add_argument('--tomato-acm-target-only', action='store_true',
                    help='목표마다 그 열매만 ACM 완화(나머지는 장애물). '
                         '기본은 열매 전부 완화 — 이웃 회피를 재지 않는다')
+    # [2026-08-02] 데모용 장애물(베드-통 사이 기둥)을 주입 직전에 **메모리에서**
+    # 합친다 — 파일을 새로 만들지 않으므로 같은 세션에서 유무만 바꿔 두 번 돌릴
+    # 수 있다(함정 10: 세션이 다르면 +-8%가 그냥 흔들린다).
+    p.add_argument('--obstacle', action='store_true',
+                   help='octomap에 데모 장애물을 합친다(--octomap과 같이 쓴다). '
+                        '회피를 보려면 --octomap-acm 없이 돌릴 것')
     p.add_argument('--tomatoes', action='store_true',
                    help='검출 열매를 구 collision object로 넣고 ACM을 푼다')
     # [2026-08-02] octomap 쪽 ACM 완화. 열매(구)에는 --tomatoes가 이미 걸어
@@ -1185,11 +1191,17 @@ def main():
             import octomap_io
             from moveit_msgs.msg import PlanningScene
             owp = octomap_io.load_octomap_file(args.octomap)
+            if args.obstacle:
+                lo, hi = octomap_io.obstacle_box()
+                print(f'장애물 합침: x {lo[0]:+.2f}~{hi[0]:+.2f}, '
+                      f'y {lo[1]:+.2f}~{hi[1]:+.2f}, z {lo[2]:.2f}~{hi[2]:.2f}')
+                owp, _ = octomap_io.merge_box(owp, lo, hi)
             octomap_io.inject_octomap(node, rclpy, PlanningScene, owp)
             leaves = octomap_io.decode_msg(owp.octomap)
             octomap_io.summarize(leaves, owp.octomap.resolution,
                                  label=f'octomap({args.octomap}): ')
-            parts.append(f'octomap voxel {len(leaves)}개')
+            parts.append(f'octomap voxel {len(leaves)}개'
+                         + ('(장애물 포함)' if args.obstacle else ''))
             # **항상 호출한다(끌 때도).** ACM은 move_group의 planning scene에
             # 붙어 있어 스크립트가 죽어도 남는다. 앞 실행이 kill -9로 끝나
             # teardown을 못 돌면 완화가 그대로 살아 있고, 다음 실행이 그걸

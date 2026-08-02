@@ -484,24 +484,43 @@ def wall_box():
             (WALL_X_MAX_M, WALL_Y_M + half, WALL_Z_TOP_M))
 
 
-def cmd_add_box(args):
-    from octomap_msgs.msg import OctomapWithPose
-    from rclpy.serialization import serialize_message
+# [2026-08-02] 데모용 장애물 — **베드와 수확통 사이**를 가로막는 기둥.
+#
+# 목적이 벽과 다르다. 벽은 "실측한 작업대가 팔에 영향을 주는가"를 재려고 넣은
+# 것이고(영향 없음이 결론이었다), 이쪽은 **있을 때와 없을 때 경로가 달라지는
+# 것을 보여주려고** 일부러 길목에 세우는 것이다.
+#
+# 위치 제약이 양쪽에서 온다:
+#   - 베드 쪽 정렬 자세(flange 반경 0.13~0.175, 방위 -14~+20도)를 막으면 안 된다.
+#     막으면 "돌아간다"가 아니라 "못 간다"가 되어 데모가 아니다.
+#   - 통 자세(그리퍼 끝단 (-0.006, +0.135, +0.129))를 막아도 같은 이유로 안 된다.
+# 그래서 둘 **사이**를 고른다: x는 통(0)과 베드(0.25) 사이, y는 정렬 자세
+# (+0.06 이하)보다 바깥이고 통(+0.135)에 닿지 않는 구간.
+OBSTACLE_X_MIN_M = 0.06
+OBSTACLE_X_MAX_M = 0.14
+OBSTACLE_Y_MIN_M = 0.08
+OBSTACLE_Y_MAX_M = 0.16
+OBSTACLE_Z_TOP_M = 0.30
 
-    owp = load_octomap_file(args.path)
-    res = owp.octomap.resolution
-    base = decode_msg(owp.octomap)
-    print(f'입력: {args.path}')
-    summarize(base, res, label='  ')
 
-    if args.wall:
-        lo, hi = wall_box()
-        print(f'\n벽 프리셋: x {lo[0]:+.2f}~{hi[0]:+.2f}, '
-              f'y {lo[1]:+.3f}~{hi[1]:+.3f}, z {lo[2]:.2f}~{hi[2]:.2f}')
-    else:
-        lo, hi = tuple(args.xyz_min), tuple(args.xyz_max)
-        print(f'\n상자: {lo} ~ {hi}')
+def obstacle_box():
+    """데모 장애물의 (xyz_min, xyz_max)."""
+    return ((OBSTACLE_X_MIN_M, OBSTACLE_Y_MIN_M, 0.0),
+            (OBSTACLE_X_MAX_M, OBSTACLE_Y_MAX_M, OBSTACLE_Z_TOP_M))
 
+
+def merge_box(owp, lo, hi, verbose=True):
+    """octomap 메시지에 축정렬 상자를 voxel로 합친 **새 메시지**를 돌려준다.
+
+    파일로 굳히는 경로(add-box), 살아있는 씬에 바로 넣는 경로(obstacle add),
+    스윕이 주입 직전에 합치는 경로가 **같은 코드**를 쓰게 하려고 뺐다. 셋이
+    갈리면 "파일로 만든 장애물"과 "화면에 뜬 장애물"이 조용히 달라진다.
+    """
+    import copy
+
+    out = copy.deepcopy(owp)
+    res = out.octomap.resolution
+    base = decode_msg(out.octomap)
     added = box_leaves(lo, hi, res)
     # 중복 제거 — 이미 그 자리에 voxel이 있으면 한 번만 쓴다.
     have = {(round(l[0] / res), round(l[1] / res), round(l[2] / res))
@@ -509,27 +528,106 @@ def cmd_add_box(args):
     fresh = [l for l in added
              if (round(l[0] / res), round(l[1] / res), round(l[2] / res)) not in have]
     merged = base + fresh
-    print(f'  상자 voxel {len(added)}개 중 새로 추가 {len(fresh)}개')
+    if verbose:
+        print(f'  상자 voxel {len(added)}개 중 새로 추가 {len(fresh)}개')
 
-    owp.octomap.binary = False
-    owp.octomap.id = 'OcTree'
+    out.octomap.binary = False
+    out.octomap.id = 'OcTree'
     blob = encode_octree(merged, res)
     # Octomap.data는 int8[]이라 128~255를 그대로 넣으면 OverflowError가 난다.
-    owp.octomap.data = [b - 256 if b > 127 else b for b in blob]
+    out.octomap.data = [b - 256 if b > 127 else b for b in blob]
     # 되읽어 검산한다 — 인코더가 틀리면 move_group이 조용히 무시하거나 죽는다.
     check = decode_octree(blob, res, False)
     n_expanded = sum(max(1, round(l[3] / res)) ** 3 for l in merged)
     if len(check) != n_expanded:
         raise SystemExit(f'인코딩 검산 실패: {n_expanded} -> {len(check)}')
-    print(f'\n출력: {args.out}')
-    summarize(check, res, label='  ')
+    return out, check
 
+
+def save_octomap_file(owp, path):
+    """OctomapWithPose -> 파일. load_octomap_file의 짝이고 형식도 같다."""
+    from rclpy.serialization import serialize_message
     payload = serialize_message(owp)
-    with open(args.out, 'wb') as fh:
+    with open(path, 'wb') as fh:
         fh.write(MAGIC)
         fh.write(struct.pack('<I', len(payload)))
         fh.write(payload)
     print(f'저장 완료 ({len(payload)}바이트)')
+
+
+def cmd_add_box(args):
+    owp = load_octomap_file(args.path)
+    res = owp.octomap.resolution
+    print(f'입력: {args.path}')
+    summarize(decode_msg(owp.octomap), res, label='  ')
+
+    if args.wall:
+        lo, hi = wall_box()
+        label = '벽 프리셋'
+    elif args.obstacle:
+        lo, hi = obstacle_box()
+        label = '장애물 프리셋(베드-통 사이)'
+    else:
+        lo, hi = tuple(args.xyz_min), tuple(args.xyz_max)
+        label = '상자'
+    print(f'\n{label}: x {lo[0]:+.2f}~{hi[0]:+.2f}, y {lo[1]:+.3f}~{hi[1]:+.3f}, '
+          f'z {lo[2]:.2f}~{hi[2]:.2f}')
+
+    merged_owp, check = merge_box(owp, lo, hi)
+    print(f'\n출력: {args.out}')
+    summarize(check, res, label='  ')
+    save_octomap_file(merged_owp, args.out)
+
+
+def cmd_obstacle(args):
+    """[2026-08-02] **살아있는 씬**에 데모 장애물을 넣고 뺀다.
+
+    파일을 새로 만들지 않는다 — base를 읽어 메모리에서 상자를 합쳐 주입(add)
+    하거나, base만 다시 주입(remove)한다. RViz를 켜 둔 채 한 줄로 넣었다 뺐다
+    할 수 있어야 "있을 때 vs 없을 때"를 눈으로 비교할 수 있다.
+
+    주의: `--octomap-acm`(그리퍼/손목 완화)을 켠 상태에서는 이 장애물을
+    **손목까지 통과한다**(문서 6.3절). 회피를 보여주려면 완화 없이 볼 것.
+    """
+    (rclpy, Node, PlanningScene, PlanningSceneComponents, GetPlanningScene,
+     _OctomapWithPose, _a, _b) = _ros_imports()
+
+    owp = load_octomap_file(args.base)
+    res = owp.octomap.resolution
+    print(f'base: {args.base}')
+    summarize(decode_msg(owp.octomap), res, label='  ')
+
+    if args.action == 'add':
+        if args.xyz_min != [0, 0, 0] or args.xyz_max != [0, 0, 0]:
+            lo, hi = tuple(args.xyz_min), tuple(args.xyz_max)
+        else:
+            lo, hi = obstacle_box()
+        print(f'\n장애물 추가: x {lo[0]:+.2f}~{hi[0]:+.2f}, '
+              f'y {lo[1]:+.2f}~{hi[1]:+.2f}, z {lo[2]:.2f}~{hi[2]:.2f}')
+        owp, leaves = merge_box(owp, lo, hi)
+    else:
+        print('\n장애물 제거 — base만 다시 주입한다')
+        leaves = decode_msg(owp.octomap)
+
+    rclpy.init()
+    node = Node('octomap_obstacle')
+    # 주입이 남았는지 되읽고 재시도한다 — 앞 프로세스가 부른 /clear_octomap이
+    # **비동기라 우리 주입 뒤에 도착할 수 있다**(함정 13).
+    n_in = len(owp.octomap.data)
+    n_out = -1
+    for attempt in range(1, 4):
+        inject_octomap(node, rclpy, PlanningScene, owp)
+        got = fetch_octomap(node, rclpy, GetPlanningScene, PlanningSceneComponents)
+        n_out = len(got.octomap.data)
+        if n_out == n_in:
+            break
+        print(f'  주입 {attempt}회차 실패({n_out}바이트) — 재시도')
+    print(f'\n씬 확인: voxel {len(leaves)}개, {n_out}바이트 '
+          + ('(일치)' if n_in == n_out else '**불일치, 덮어써졌다**'))
+    node.destroy_node()
+    rclpy.shutdown()
+    if n_in != n_out:
+        sys.exit(1)
 
 
 def cmd_stats(args):
@@ -589,11 +687,23 @@ def main():
                         help='octomap 파일에 축정렬 상자를 voxel로 합쳐 새 파일 생성')
     ab.add_argument('path')
     ab.add_argument('out')
+    ab.add_argument('--obstacle', action='store_true',
+                    help='데모 장애물 프리셋(베드-통 사이 기둥)')
     ab.add_argument('--wall', action='store_true',
                     help='실측 벽 프리셋을 쓴다(y=-0.10, x -0.50~0, z 0~0.15)')
     ab.add_argument('--xyz-min', nargs=3, type=float, default=[0, 0, 0])
     ab.add_argument('--xyz-max', nargs=3, type=float, default=[0, 0, 0])
     ab.set_defaults(func=cmd_add_box)
+
+    ob = sub.add_parser(
+        'obstacle', help='살아있는 씬에 데모 장애물을 넣고 뺀다(베드-통 사이 기둥)')
+    ob.add_argument('action', choices=['add', 'remove'])
+    ob.add_argument('--base', default='bags/bed_look_octomap_wall.bin',
+                    help='장애물을 얹을 바탕 octomap 파일')
+    ob.add_argument('--xyz-min', nargs=3, type=float, default=[0, 0, 0],
+                    help='프리셋 대신 직접 지정(add일 때만)')
+    ob.add_argument('--xyz-max', nargs=3, type=float, default=[0, 0, 0])
+    ob.set_defaults(func=cmd_obstacle)
 
     args = p.parse_args()
     args.func(args)
