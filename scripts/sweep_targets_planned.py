@@ -714,7 +714,7 @@ def _label_lines(pose_label, index, total, d, results):
 
 def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0,
                  pose_label='look pose', display_seconds=3.0, display_repeats=3,
-                 roll_symmetry=False, straight_in=False):
+                 roll_symmetry=False, straight_in=False, acm_only_target=False):
     """모든 목표를 repeat회씩 플래닝하고 행 목록을 돌려준다.
 
     display_pause > 0이면 목표마다 계획 궤적을 /display_planned_path로 발행하고
@@ -725,6 +725,14 @@ def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0,
     rows = []
     status = {}
     for index, d in enumerate(dets):
+        # [2026-08-02] 목표마다 **그 열매만** 완화한다 — 나머지 14개는 장애물로
+        # 남는다. 기본(전부 완화)은 그리퍼가 옆 열매를 통과하는 경로도 성공으로
+        # 집계한다(함정 17). scene_objects.allow_gripper_tomato_collisions의
+        # only 인자 설명 참고.
+        if acm_only_target:
+            import scene_objects
+            scene_objects.allow_gripper_tomato_collisions(node, dets,
+                                                          only=index, quiet=True)
         best, reason = select_approach(d['base_x'], d['base_y'], d['base_z'])
         if best is None:
             rows.append({**d, 'reason': reason, 'success': 0, 'trials': 0})
@@ -1002,6 +1010,13 @@ def main():
     p.add_argument('--targets', default='bags/lab_bed_detections.json')
     # [2026-08-01] 씬에 장애물을 넣는 두 옵션. 안 주면 **빈 씬**이고, 그러면
     # 뚫고 가는 경로가 성공으로 잡힌다(2절 함정 3 — 세 번 데였다).
+    # [2026-08-02] 사용자 지적 — "옆에 있는 토마토도 충돌한다. ACM 완화하면
+    # 다른 토마토를 장애물로 인식하지 않는가?" 맞다. 기본은 열매 전부를
+    # 완화하므로 이웃 회피를 재지 않는다(함정 17). 이 옵션은 목표마다 그
+    # 열매 하나만 완화해 "이웃을 피하려면 무엇을 치러야 하는가"를 잰다.
+    p.add_argument('--tomato-acm-target-only', action='store_true',
+                   help='목표마다 그 열매만 ACM 완화(나머지는 장애물). '
+                        '기본은 열매 전부 완화 — 이웃 회피를 재지 않는다')
     p.add_argument('--tomatoes', action='store_true',
                    help='검출 열매를 구 collision object로 넣고 ACM을 푼다')
     # [2026-08-02] octomap 쪽 ACM 완화. 열매(구)에는 --tomatoes가 이미 걸어
@@ -1153,7 +1168,8 @@ def main():
                                     display_seconds=args.display_seconds,
                                     display_repeats=args.display_repeats,
                                     roll_symmetry=args.roll_symmetry,
-                                    straight_in=args.straight_in)
+                                    straight_in=args.straight_in,
+                                    acm_only_target=args.tomato_acm_target_only)
                 # 다음 회차 전에 마커 색을 초기화한다 — 안 그러면 전부 초록/회색인
                 # 채로 시작해 "지금 어디를 보고 있는지"가 안 보인다.
                 node.publish_markers(dets)
@@ -1162,7 +1178,8 @@ def main():
     else:
         rows = evaluate_all(node, dets, args.repeat,
                             roll_symmetry=args.roll_symmetry,
-                            straight_in=args.straight_in)
+                            straight_in=args.straight_in,
+                            acm_only_target=args.tomato_acm_target_only)
 
     planned = [r for r in rows if r.get('trials')]
     total_trials = sum(r['trials'] for r in planned)

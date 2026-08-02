@@ -85,8 +85,8 @@ def publish_tomatoes(node, dets, remove=False):
         rclpy.spin_once(node, timeout_sec=0.05)
 
 
-def allow_gripper_tomato_collisions(node, dets, quiet=False):
-    """그리퍼·손목·flange가 **모든 토마토**와 충돌해도 되게 ACM을 고친다.
+def allow_gripper_tomato_collisions(node, dets, only=None, quiet=False):
+    """그리퍼·손목·flange가 토마토와 충돌해도 되게 ACM을 고친다.
 
     이걸 안 하면 접근할 토마토 자신과 충돌해 플래닝이 거의 전부 실패한다 —
     실측 성공률 2~4%였다. coord_to_goal_node가 목표 지점의 target_object에
@@ -95,8 +95,20 @@ def allow_gripper_tomato_collisions(node, dets, quiet=False):
     valid states for goal tree로 매번 실패"했다는 실측 기록이 있고, joint5/
     joint6도 같은 이유로 허용 목록에 있다.
 
-    주의: 이 처리는 "그리퍼가 열매를 스쳐도 된다"는 뜻이다. 팔뚝(joint2~4)은
-    여전히 충돌로 잡히므로, 팔이 베드를 관통하는 경로는 그대로 걸러진다.
+    **`only`가 이 함수의 핵심 인자다** (2026-08-02 추가).
+
+      only=None  열매 **전부**를 완화한다. 그러면 그리퍼가 **옆 토마토를
+                 통과하는 경로도 성공으로 잡힌다** — 문서의 열매 포함 수치가
+                 전부 이 조건이고, 그만큼 낙관적이다(함정 17).
+      only=i     i번 열매만 완화하고 나머지는 장애물로 남긴다. "접근할 열매
+                 자신과의 충돌"만 풀어주는, 원래 의도에 맞는 조건이다.
+
+    노드는 이웃 열매를 씬에 **등록하지 않으므로** only=None 쪽에 가깝다.
+    즉 only=i는 "노드가 지금 하는 일"이 아니라 **"이웃을 피하려면 무엇을
+    치러야 하는가"**를 재는 조건이다.
+
+    주의: 어느 쪽이든 팔뚝(joint2~4)은 여전히 충돌로 잡히므로, 팔이 베드를
+    관통하는 경로는 그대로 걸러진다.
 
     **octomap에는 이 허용이 적용되지 않는다.** octomap은 열매를 지운
     클라우드에서 나온 것이라 줄기·지지대·잎만 들어 있고, 그건 그리퍼가
@@ -109,18 +121,27 @@ def allow_gripper_tomato_collisions(node, dets, quiet=False):
     names = list(acm.entry_names)
     rows = [list(e.enabled) for e in acm.entry_values]
 
+    # 없는 토마토 항목만 추가한다(전부 False로). 값 자체는 아래에서 세운다 —
+    # **매번 다시 세우는 것이 중요하다.** 예전 판은 이미 있는 항목을 건너뛰어서
+    # only를 바꿔 다시 불러도 앞의 완화가 그대로 남았다(함정 15와 같은 종류).
     for i in range(len(dets)):
         oid = f'{TOMATO_OBJECT_PREFIX}{i}'
-        if oid in names:
-            continue
-        for row in rows:
-            row.append(False)
-        for j, nm in enumerate(names):
-            rows[j][-1] = nm in allowed
-        new_row = [nm in allowed for nm in names]
-        new_row.append(False)
-        names.append(oid)
-        rows.append(new_row)
+        if oid not in names:
+            for row in rows:
+                row.append(False)
+            names.append(oid)
+            rows.append([False] * len(names))
+
+    index = {nm: k for k, nm in enumerate(names)}
+    for i in range(len(dets)):
+        j = index[f'{TOMATO_OBJECT_PREFIX}{i}']
+        allow = (only is None or only == i)
+        for link in allowed:
+            k = index.get(link)
+            if k is None:
+                continue
+            rows[j][k] = allow
+            rows[k][j] = allow
 
     updated = AllowedCollisionMatrix()
     updated.entry_names = names
@@ -135,8 +156,10 @@ def allow_gripper_tomato_collisions(node, dets, quiet=False):
     for _ in range(20):
         rclpy.spin_once(node, timeout_sec=0.05)
     if not quiet:
-        print(f'ACM 갱신: 그리퍼/손목/flange {len(allowed)}개 링크 x 토마토 '
-              f'{len(dets)}개 충돌 허용 (팔뚝은 그대로 충돌로 잡힘)')
+        what = ('토마토 전부' if only is None
+                else f'토마토 #{only + 1}만 (나머지 {len(dets) - 1}개는 장애물)')
+        print(f'ACM 갱신: 그리퍼/손목/flange {len(allowed)}개 링크 x {what} '
+              '충돌 허용 (팔뚝은 그대로 충돌로 잡힘)')
 
 
 OCTOMAP_ACM_NAME = '<octomap>'
