@@ -253,18 +253,25 @@ python3 -u scripts/sweep_targets_planned.py --repeat 10 --orientation-tolerance 
 ```bash
 python3 -u scripts/demo_obstacle_ab.py \
     --target 4 --cycle bsc --preset both \
-    --repeat 5 --display-seconds 6 --display-repeats 2 --pause 1.5
+    --repeat 15 --display-seconds 6 --display-repeats 2 --pause 1.5
 ```
+
+> **`--repeat`를 15회 이상으로 줄 것.** 5회로 돌렸더니 어떤 회차는
+> ON 516° / OFF 512°로 **차이가 아예 안 보였다**(녹화 중 실제로 겪음).
+> 장애물이 없는 쪽이 가끔 비싼 분기(B무리)에 걸리기 때문이고, 이게 핸드오프
+> 함정 16(두 분기 비용이 비슷해 최소 선택이 동전 던지기가 된다)이다. 반복을
+> 올리면 최소가 수렴해 짧은 경로를 안정적으로 찾는다 — 계획은 목표당 0.05초라
+> 비용도 거의 없다.
 
 한 목표에 대해 `장애물 ON`(주황 라벨) → `OFF`(파랑 라벨)를 무한 반복한다.
 실측(목표 #4, 기둥+벽):
 
 | 조건 | 정렬 이동량 | 복귀 이동량 |
 |---|---|---|
-| ON | 480° | 418° |
-| OFF | 319° | 317° |
+| ON | 429~527° | 411~513° |
+| OFF | 333~357° | 331~356° |
 
-**정렬 +50%, 복귀 +32%.** 회차를 거듭해도 값이 재현된다(479/420).
+**정렬 +20~58%, 복귀 +15~55%** (반복 15회, 회차별 범위).
 
 - `--target 1~15`로 목표를 바꾼다(차이가 큰 목표를 골라 쓸 것)
 - `--preset pillar|wall|both`
