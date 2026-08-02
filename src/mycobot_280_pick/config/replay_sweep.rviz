@@ -1,0 +1,155 @@
+# 트랙 A(장면 rosbag) 재생 확인용 RViz 설정.
+#   rviz2 -d src/mycobot_280_pick/config/scene_replay.rviz
+#
+# 담긴 디스플레이 4개 — 녹화에서 보려던 것과 1:1로 대응한다:
+#   RobotModel      팔 (look pose 고정)
+#   PointCloud2     필터 노드가 재생성한 컬러 클라우드 (Color Transformer=RGB8)
+#   PlanningScene   occupancy_map_monitor가 그 클라우드로 쌓은 octomap voxel
+#   Image           YOLO가 재생본에서 재검출한 bbox 영상
+#
+# Fixed Frame이 g_base인 이유: 클라우드는 camera_color_optical_frame이지만
+# handeye_publisher가 joint6->camera_link TF를 발행하므로 g_base로 변환된다.
+# 팔이 녹화 당시(look pose)와 같은 자세에 있어야 좌표가 맞는다 — eye-in-hand.
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded: ~
+    Tree Height: 700
+Visualization Manager:
+  Class: ""
+  Name: root
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 0.1
+      Plane Cell Count: 20
+      Color: 160; 160; 164
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Enabled: true
+      Description Source: Topic
+      Description Topic:
+        Value: /robot_description
+        Depth: 5
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+      Alpha: 1
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+      Marker Scale: 0.15
+      Show Names: true
+    # [2026-07-31] Color Transformer를 여기에 쓰지 않는다. RViz는 설정 파일을
+    # **첫 메시지가 도착하기 전에** 읽는데, 그 시점엔 사용 가능한 transformer
+    # 목록이 비어 있어서 "RGB8"을 못 찾고 오류 상태로 굳어버린다(실제로 겪음 —
+    # 디스플레이가 빨간색이 되고 아무것도 안 그려짐). 비워두면 RViz가 첫
+    # 메시지를 보고 알아서 고르는데, rgb 필드가 있으면 RGB8을 선택한다.
+    # 그래도 회색으로 나오면 드롭다운에서 RGB8을 직접 고를 것.
+    - Class: rviz_default_plugins/PointCloud2
+      Name: points_filtered (마스킹됨=octomap 입력)
+      Enabled: false
+      Topic:
+        Value: /camera/camera/depth/color/points_filtered
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+      Style: Points
+      Size (Pixels): 3
+      Alpha: 1
+      Decay Time: 0
+    # 토마토가 **안 지워진** 컬러 클라우드. octomap과 토글해서 "어느 voxel이
+    # 토마토인가"를 눈으로 찾는 용도 — points_filtered는 정의상 토마토가 빠져
+    # 있어서 이 목적에는 쓸 수 없다. 별도 노드 인스턴스가 발행한다:
+    #   ros2 run mycobot_280_pick pointcloud_tomato_filter_node --ros-args \
+    #       -r __node:=pointcloud_unmasked_node \
+    #       -p output_topic:=/camera/camera/depth/color/points_unmasked \
+    #       -p boxes_topic:=__no_boxes__ -p publish_rate_hz:=2.0
+    - Class: rviz_default_plugins/PointCloud2
+      Name: points_unmasked (토마토 포함)
+      Enabled: true
+      Topic:
+        Value: /camera/camera/depth/color/points_unmasked
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+      Style: Points
+      Size (Pixels): 3
+      Alpha: 1
+      Decay Time: 0
+    - Class: moveit_rviz_plugin/PlanningScene
+      Name: PlanningScene (octomap)
+      Enabled: true
+      Move Group Namespace: ""
+      Planning Scene Topic: /monitored_planning_scene
+      Scene Geometry:
+        Scene Alpha: 0.9
+        Show Scene Geometry: true
+        Voxel Coloring: Z-Axis
+        Voxel Rendering: Occupied Voxels
+      Robot Alpha: 0.5
+      Show Robot Collision: false
+      Show Robot Visual: false
+    # [2026-08-02] 아래 둘이 scene_replay.rviz와의 유일한 차이다 —
+    # **재생 스택 위에서 스윕을 돌려 보려고** 만든 설정이다.
+    # 배경(포인트클라우드·octomap)은 bag이 만들고, 그 위에서
+    # scripts/sweep_targets_planned.py가 계획한 궤적을 재생한다.
+    - Class: moveit_rviz_plugin/RobotState
+      Name: 재생 (계획 경로)
+      Enabled: true
+      Robot Description: robot_description
+      Robot State Topic: /sweep_robot_state
+      Robot Alpha: 0.6
+      Show All Links: true
+      Visual Enabled: true
+      Collision Enabled: false
+    - Class: rviz_default_plugins/MarkerArray
+      Name: 토마토 + 상태 라벨
+      Enabled: true
+      Topic:
+        Value: /tomato_markers
+        Depth: 100
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Image
+      Name: YOLO detections
+      Enabled: true
+      Topic:
+        Value: /tomato_detections_image
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+      Max Value: 1
+      Min Value: 0
+      Normalize Range: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: g_base
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Distance: 1.2
+      Yaw: 5.6
+      Pitch: 0.4
+      Focal Point:
+        X: 0.2
+        Y: 0
+        Z: 0.25
+      Near Clip Distance: 0.01
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Width: 1500
+  YOLO detections:
+    collapsed: false

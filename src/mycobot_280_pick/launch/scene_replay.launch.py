@@ -77,6 +77,13 @@ def generate_launch_description():
     ld.add_action(DeclareLaunchArgument('use_yolo', default_value='true',
                                         description='false면 검출 재생성을 건너뜀(CPU 절약)'))
     ld.add_action(DeclareLaunchArgument('use_rviz', default_value='true'))
+    # [2026-08-02] 재생 화면 위에서 **스윕까지 보려면** 디스플레이가 두 개 더
+    # 필요하다(재생 RobotState /sweep_robot_state, 마커·라벨 /tomato_markers).
+    # 그 둘만 더한 설정이 replay_sweep.rviz다.
+    ld.add_action(DeclareLaunchArgument(
+        'rviz_config', default_value='scene_replay.rviz',
+        description='config/ 아래 RViz 설정 파일 이름. 재생 위에서 스윕을 '
+                    '보려면 replay_sweep.rviz'))
     # [2026-08-01] 필터 노드의 기본값은 0.5인데, docs/ROSBAG_HANDOFF.md 6.5절이
     # 그 값이 과하다고 실측해 두었다(마스킹 면적 0.0→11.8% / 0.2→21.7% /
     # 0.5→31.5%). 넓게 지우면 토마토뿐 아니라 **줄기·지지대까지 octomap에서
@@ -235,7 +242,8 @@ def generate_launch_description():
             executable='rviz2',
             name='rviz2',
             arguments=['-d', PathJoinSubstitution([
-                FindPackageShare('mycobot_280_pick'), 'config', 'scene_replay.rviz',
+                FindPackageShare('mycobot_280_pick'), 'config',
+                LaunchConfiguration('rviz_config'),
             ])],
             condition=IfCondition(LaunchConfiguration('use_rviz')),
         )

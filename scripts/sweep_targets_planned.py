@@ -738,6 +738,40 @@ def _label_lines(pose_label, index, total, d, results, return_travel=None):
     ], rgb
 
 
+def _read_scene(node):
+    """살아있는 씬을 되읽어 (토마토 오브젝트 수, octomap voxel 수)를 돌려준다.
+
+    인자로 "무엇을 넣었는가"를 믿지 않고 **무엇이 들어 있는가**를 본다 —
+    함정 8(씬은 move_group에 붙어 있고 스크립트보다 오래 산다)과 함정 3(빈 씬은
+    조용히 낙관적인 답을 준다)이 만나는 자리다.
+    """
+    # scripts/를 경로에 넣는다 — --tomatoes/--octomap 없이 돌 때는 아래쪽
+    # 씬 구성 블록이 실행되지 않아 경로가 안 잡혀 있다.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import scene_objects as _so
+    import octomap_io as _oi
+    from moveit_msgs.msg import PlanningSceneComponents
+    from moveit_msgs.srv import GetPlanningScene
+
+    if not hasattr(node, '_scene_read_client'):
+        node._scene_read_client = node.create_client(GetPlanningScene,
+                                                     '/get_planning_scene')
+        node._scene_read_client.wait_for_service(timeout_sec=10)
+    req = GetPlanningScene.Request()
+    req.components.components = (PlanningSceneComponents.WORLD_OBJECT_NAMES
+                                 | PlanningSceneComponents.OCTOMAP)
+    fut = node._scene_read_client.call_async(req)
+    rclpy.spin_until_future_complete(node, fut, timeout_sec=10)
+    if fut.result() is None:
+        return -1, -1                      # 조회 실패는 경고를 띄우지 않는다
+    world = fut.result().scene.world
+    n_tomato = sum(1 for o in world.collision_objects
+                   if o.id.startswith(_so.TOMATO_OBJECT_PREFIX))
+    n_voxel = (len(_oi.decode_msg(world.octomap.octomap))
+               if world.octomap.octomap.data else 0)
+    return n_tomato, n_voxel
+
+
 def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0,
                  pose_label='look pose', display_seconds=3.0, display_repeats=3,
                  roll_symmetry=False, straight_in=False, acm_only_target=False,
@@ -1178,7 +1212,7 @@ def main():
         raise SystemExit(1)
 
     # 씬 구성. 이 두 줄이 있느냐 없느냐로 수치가 크게 달라지므로 항상 출력한다.
-    scene_label = '빈 씬'
+    scene_label = '이 실행이 주입한 것 없음(살아있는 씬을 그대로 씀)'
     if args.tomatoes or args.octomap:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import scene_objects
@@ -1214,13 +1248,20 @@ def main():
             else:
                 parts.append('octomap ACM 완화 없음')
         scene_label = ' + '.join(parts)
-    print(f'\n씬: {scene_label}')
-    # [2026-08-02] 빈 씬은 **조용히 낙관적인 답을 준다** — 이 문서에서 세 번
-    # 데인 함정 3이다(뚫고 가는 경로가 성공으로 집계된다). 한 줄 출력으로는
-    # 놓치기 쉬워서(실제로 놓쳤다) 눈에 띄게 경고한다. 화면 얘기까지 같이
-    # 하는 이유: 빈 씬이면 RViz에 장애물이 아무것도 안 그려져 "배경이 안
-    # 나온다"로 보인다.
-    if not (args.tomatoes or args.octomap):
+    print(f'\n씬(이 실행이 넣은 것): {scene_label}')
+
+    # [2026-08-02] **인자가 아니라 실제 씬을 되읽어 판정한다.**
+    #
+    # 처음엔 args.tomatoes/args.octomap만 보고 "빈 씬"이라 찍었는데, 그러면
+    # 두 방향으로 틀린다:
+    #   - 재생 스택(scene_replay.launch.py) 위에서 돌리면 살아있는 octomap이
+    #     이미 있는데도 "비었다"고 경고한다.
+    #   - 앞 실행이 남긴 토마토·octomap을 물려받아도 "비었다"고 믿는다(함정 8).
+    # eval_bed_scene.py의 verify_scene이 같은 이유로 하는 일을 여기서도 한다.
+    scene_tomatoes, scene_voxels = _read_scene(node)
+    print(f'  씬 확인(되읽음): 토마토 {scene_tomatoes}개, '
+          f'octomap voxel {scene_voxels}개')
+    if scene_tomatoes == 0 and scene_voxels == 0:
         print('  ** 경고: 장애물이 하나도 없다 — 뚫고 가는 경로가 성공으로 '
               '잡힌다(함정 3).')
         print('     실물에 가깝게 재려면: --tomatoes --octomap '
