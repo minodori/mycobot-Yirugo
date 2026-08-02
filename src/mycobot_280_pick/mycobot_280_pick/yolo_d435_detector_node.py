@@ -139,6 +139,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image, JointState
 from std_msgs.msg import Float32, Float32MultiArray
+from std_srvs.srv import SetBool
 from ultralytics import YOLO
 
 # [2026-07-27] 이전 세션엔 실물 검출이 전부 'rotten'으로 잡혀서 임시로
@@ -376,6 +377,21 @@ class YoloD435DetectorNode(Node):
         self.declare_parameter('color_topic', DEFAULT_COLOR_TOPIC)
         self.declare_parameter('depth_topic', DEFAULT_DEPTH_TOPIC)
         self.declare_parameter('camera_info_topic', DEFAULT_CAMERA_INFO_TOPIC)
+        # [2026-08-02] 이 노드가 **직접 팔을 움직이게 할 것인가.**
+        #
+        # false(기본)면 target_point/target_radius_m를 발행하지 않고
+        # tomato_candidates만 낸다 — 즉 파지 명령은 오직 harvest_sequence_node를
+        # 거친다. 이 노드가 목표를 직접 쏘면 "도달 -> look pose 복귀 -> 재검출 ->
+        # 다시 이동"이 무한 반복되는 사고가 난다(2026-07-24 실물에서 실제로 겪음,
+        # 위 모듈 docstring 참고). 누적판단 게이팅으로 "look pose 방문당 1회"까지는
+        # 줄였지만, **방문 자체가 사이클마다 일어난다**:
+        #   LPC  목표마다 look pose로 복귀 -> 매 수확마다 게이트가 열린다
+        #   ASC/BSC  중간엔 안 열리지만 시퀀스 종료 후 /go_to_look_pose에서 열린다
+        # 그래서 "1회로 줄이는 것"이 아니라 **발행 자체를 끄는 것**이 기본이다.
+        #
+        # true로 두면 예전 동작(단발 수동 테스트용) — 시퀀스 노드 없이 토마토
+        # 하나를 바로 따 보게 된다. 실물에서는 위 사고 경로가 다시 열린다.
+        self.declare_parameter('publish_target_point', False)
 
         model_path = (
             self.get_parameter('model_path').get_parameter_value().string_value
@@ -400,11 +416,23 @@ class YoloD435DetectorNode(Node):
         self._intrinsics = None  # (fx, fy, cx, cy), camera_info 수신 시 채워짐
         self._frame_id = None
 
+        self._publish_target_point = (
+            self.get_parameter('publish_target_point')
+            .get_parameter_value()
+            .bool_value
+        )
+
         # [Tier2] look pose 게이팅 + 누적판단 상태.
         self._at_look_pose = False
         self._judgment_locked = False
         self._accumulated_detections = []  # [(class_id, x, y, z, confidence), ...]
         self._accumulation_timer = None
+        # [2026-08-02] 판단 전체를 외부에서 얼릴 수 있게 한다(set_judgment_enabled).
+        # 수확 시퀀스가 도는 동안 harvest_sequence_node가 이걸 내린다 — 시퀀스는
+        # 시작 시점 스냅샷 하나로 끝까지 가므로(그 파일 docstring), 중간에 나오는
+        # 새 판단은 큐를 못 바꾸면서 팔만 흔들 수 있다. 특히 LPC는 목표마다
+        # look pose로 돌아가 판단이 매번 열린다.
+        self._judgment_enabled = True
 
         self._publisher = self.create_publisher(PointStamped, 'target_point', 10)
         # [2026-07-27, 그리퍼 폭 동적화] target_point와 함께 발행되는 대상
@@ -420,6 +448,12 @@ class YoloD435DetectorNode(Node):
         )
         self._annotated_image_publisher = self.create_publisher(
             Image, 'tomato_detections_image', 10
+        )
+
+        # [2026-08-02] 수확 시퀀스가 도는 동안 판단을 얼리는 스위치.
+        # harvest_sequence_node가 시작 시 false, 종료 시 true로 부른다.
+        self._judgment_service = self.create_service(
+            SetBool, '~/set_judgment_enabled', self._on_set_judgment_enabled
         )
 
         self._camera_info_sub = self.create_subscription(
@@ -445,21 +479,55 @@ class YoloD435DetectorNode(Node):
             f'yolo_d435_detector_node 준비 완료. 추론/시각화는 '
             f'매 프레임 실시간 발행(2026-07-28 원복), '
             f"'{TARGET_CLASS_NAME}' 등 판단은 look pose에서 "
-            f'{ACCUMULATION_WINDOW_SEC}초 누적 후 1회만 /target_point에 '
-            f'발행합니다. color={color_topic}, depth={depth_topic}'
+            f'{ACCUMULATION_WINDOW_SEC}초 누적 후 1회만 발행합니다. '
+            + ('target_point **발행함**(publish_target_point=true) — 이 노드가 '
+               '직접 팔을 움직인다.'
+               if self._publish_target_point else
+               'target_point는 발행하지 않는다(publish_target_point=false) — '
+               '파지는 harvest_sequence_node를 거친다.')
+            + f' color={color_topic}, depth={depth_topic}'
         )
 
     def _on_camera_info(self, msg: CameraInfo) -> None:
         self._intrinsics = (msg.k[0], msg.k[4], msg.k[2], msg.k[5])
         self._frame_id = msg.header.frame_id
 
+    def _on_set_judgment_enabled(self, request, response):
+        """[2026-08-02] 판단(누적 -> candidates/target_point)을 켜고 끈다.
+
+        끄면 진행 중인 누적도 취소한다 — 안 그러면 얼린 직후 타이머가 한 번 더
+        터져 판단이 나간다. 켤 때는 여기서 누적을 시작하지 않는다: 팔이 look
+        pose에 **들어오는 순간**(_on_joint_states)이 시작점이어야 이미 지나간
+        방문을 뒤늦게 판단하지 않는다.
+        """
+        want = bool(request.data)
+        if want == self._judgment_enabled:
+            response.success = True
+            response.message = f'이미 {"켜짐" if want else "얼림"} 상태'
+            return response
+
+        self._judgment_enabled = want
+        if not want:
+            self._reset_judgment_state()
+        self.get_logger().info(
+            '판단 해제 — look pose에 들어오면 다시 누적한다.' if want
+            else '판단 얼림 — 수확 시퀀스가 끝날 때까지 candidates/target_point를 '
+                 '내지 않는다.'
+        )
+        response.success = True
+        response.message = '판단 켜짐' if want else '판단 얼림'
+        return response
+
     def _on_joint_states(self, msg: JointState) -> None:
         positions_by_name = dict(zip(msg.name, msg.position))
         at_look_pose = _is_near_look_pose(positions_by_name)
 
+        # 얼려 있으면 look pose를 드나들어도 누적을 시작하지 않는다. 위치 추적
+        # (_at_look_pose)은 계속 해둬야 해제 직후 상태가 맞는다.
         if at_look_pose and not self._at_look_pose:
             self._at_look_pose = True
-            self._start_accumulation()
+            if self._judgment_enabled:
+                self._start_accumulation()
         elif not at_look_pose and self._at_look_pose:
             self._at_look_pose = False
             self._reset_judgment_state()
@@ -520,6 +588,17 @@ class YoloD435DetectorNode(Node):
         self._candidates_publisher.publish(msg)
 
     def _publish_best_target(self, clusters) -> None:
+        # [2026-08-02] 기본은 발행하지 않는다 — 파지 명령은 시퀀스 노드를 거친다
+        # (publish_target_point 파라미터 설명 참고). 조용히 넘어가면 "왜 안
+        # 움직이지"가 되므로 한 번은 남긴다.
+        if not self._publish_target_point:
+            self.get_logger().info(
+                'target_point 미발행(publish_target_point=false) — 파지는 '
+                'harvest_sequence_node의 /start_harvest_sequence로 시작할 것. '
+                f'후보 {len(clusters)}개는 tomato_candidates로 발행됨.'
+            )
+            return
+
         target_clusters = [
             c for c in clusters
             if self._model.names[c['class_id']] == TARGET_CLASS_NAME

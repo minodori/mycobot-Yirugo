@@ -41,12 +41,23 @@ import csv
 import json
 import math
 
-from geometry_msgs.msg import PointStamped
-import rclpy
-from rclpy.node import Node
-from std_msgs.msg import Float32MultiArray
-from tf2_geometry_msgs import do_transform_point
-import tf2_ros
+# [2026-08-02] ROS import를 **선택적**으로 둔다 — `--compare`는 파일 둘만 읽는
+# 모드라 ROS가 없는 자리(보정본을 손보는 노트북 등)에서도 돌아야 한다. 없으면
+# Node 정의를 건너뛰고, 실제로 필요할 때(main의 수집 경로) 이유를 말하며 멈춘다.
+try:
+    from geometry_msgs.msg import PointStamped
+    import rclpy
+    from rclpy.node import Node
+    from std_msgs.msg import Float32MultiArray
+    from tf2_geometry_msgs import do_transform_point
+    import tf2_ros
+    HAVE_ROS = True
+except ImportError as _exc:      # noqa: F841 — 메시지는 main에서 쓴다
+    HAVE_ROS = False
+    _ROS_IMPORT_ERROR = _exc
+    # 아래 class 정의(어노테이션 포함)가 import 시점에 깨지지 않도록 자리만 채운다.
+    Node = object
+    PointStamped = Float32MultiArray = object
 
 BASE_LINK_NAME = 'g_base'
 CAMERA_FRAME = 'camera_color_optical_frame'
@@ -107,11 +118,83 @@ class ExportNode(Node):
         self.rows = rows
 
 
+def compare_files(path_a, path_b, max_pair_m=0.10):
+    """[2026-08-02] 원본 검출과 **사람이 보정한 파일**의 차이를 표로 찍는다.
+
+    왜 필요한가 — YOLO 좌표는 실제 파지에서 오차가 있어(bbox depth가 물체의
+    카메라 쪽 표면) 사람이 손으로 고친 파일을 쓰는 경로가 있다
+    (harvest_sequence_node의 target_source:=file). 그런데 손으로 고치다 보면
+    **단위(m/mm)와 부호**를 틀리기 쉽고, 틀려도 파일은 멀쩡해 보인다. 실제로
+    로봇을 움직여 보기 전에 여기서 걸러야 한다.
+
+    짝짓기는 **가장 가까운 것끼리**다(순서가 바뀌어도 된다). max_pair_m보다 멀면
+    짝이 없는 것으로 본다 — 그 자체가 "너무 많이 옮겼다"는 신호다.
+    """
+    def load(path):
+        with open(path, encoding='utf-8') as fh:
+            return json.load(fh)['detections']
+
+    a, b = load(path_a), load(path_b)
+    print(f'원본  {path_a}: {len(a)}개')
+    print(f'보정본 {path_b}: {len(b)}개\n')
+
+    def xyz(d):
+        return (d['base_x'], d['base_y'], d['base_z'])
+
+    used = set()
+    print(f'{"#":>2} {"class":<8}{"원본 xyz(m)":>26}'
+          f'{"dx(mm)":>9}{"dy(mm)":>9}{"dz(mm)":>9}{"거리(mm)":>11}')
+    unmatched_b = list(range(len(b)))
+    for i, da in enumerate(a, 1):
+        pa = xyz(da)
+        best, best_d = None, None
+        for j, db in enumerate(b):
+            if j in used:
+                continue
+            d = math.dist(pa, xyz(db))
+            if best_d is None or d < best_d:
+                best, best_d = j, d
+        if best is None or best_d > max_pair_m:
+            print(f'{i:>2} {da.get("class_name", "?"):<8}'
+                  f'({pa[0]:+.3f},{pa[1]:+.3f},{pa[2]:+.3f})'
+                  f'{"  — 보정본에 짝 없음":>40}')
+            continue
+        used.add(best)
+        unmatched_b.remove(best)
+        pb = xyz(b[best])
+        dx, dy, dz = (1000 * (pb[k] - pa[k]) for k in range(3))
+        print(f'{i:>2} {da.get("class_name", "?"):<8}'
+              f'({pa[0]:+.3f},{pa[1]:+.3f},{pa[2]:+.3f})'
+              f'{dx:+9.1f}{dy:+9.1f}{dz:+9.1f}{best_d * 1000:11.1f}')
+    for j in unmatched_b:
+        pb = xyz(b[j])
+        print(f'   {b[j].get("class_name", "?"):<8}'
+              f'({pb[0]:+.3f},{pb[1]:+.3f},{pb[2]:+.3f})'
+              f'{"  <- 보정본에만 있음":>40}')
+
+    print('\n단위는 mm다. 수십 mm를 넘는 값이 보이면 m/mm를 헷갈렸는지 확인할 것 '
+          '— 이 표의 목적이 그거다.')
+
+
 def main():
     p = argparse.ArgumentParser(description='YOLO 토마토 후보를 g_base 좌표로 내보내기')
     p.add_argument('--out', default='bed_detections', help='출력 파일 이름(확장자 제외)')
     p.add_argument('--timeout', type=float, default=45.0, help='대기 시간(초)')
+    # [2026-08-02] ROS 없이 파일 둘만 비교하는 모드.
+    p.add_argument('--compare', nargs=2, metavar=('원본.json', '보정본.json'),
+                   default=None,
+                   help='두 좌표 파일의 차이를 mm로 찍는다(ROS 불필요)')
     args = p.parse_args()
+
+    if args.compare:
+        compare_files(*args.compare)
+        return
+
+    if not HAVE_ROS:
+        raise SystemExit(
+            f'ROS2 환경이 없어 검출 수집을 할 수 없다({_ROS_IMPORT_ERROR}). '
+            'source /opt/ros/jazzy/setup.bash 후 다시 실행할 것. '
+            '(--compare는 ROS 없이도 된다)')
 
     rclpy.init()
     node = ExportNode()
