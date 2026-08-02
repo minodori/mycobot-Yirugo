@@ -592,6 +592,44 @@ def cmd_obstacle(args):
     (rclpy, Node, PlanningScene, PlanningSceneComponents, GetPlanningScene,
      _OctomapWithPose, _a, _b) = _ros_imports()
 
+    # [2026-08-02] **실물에서는 이쪽을 쓴다.** octomap voxel로 넣으면 D435
+    # 클라우드 갱신과 coord_to_goal_node의 /clear_octomap에 지워진다(문서 5.6b).
+    # collision object는 둘 다에 안 지워진다.
+    if args.as_object:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import scene_objects
+        if args.action == 'add':
+            if args.xyz_min != [0, 0, 0] or args.xyz_max != [0, 0, 0]:
+                lo, hi = tuple(args.xyz_min), tuple(args.xyz_max)
+            else:
+                lo, hi = obstacle_box()
+            print(f'collision object 장애물 추가: x {lo[0]:+.2f}~{hi[0]:+.2f}, '
+                  f'y {lo[1]:+.2f}~{hi[1]:+.2f}, z {lo[2]:.2f}~{hi[2]:.2f}')
+        else:
+            lo = hi = (0, 0, 0)
+            print('collision object 장애물 제거')
+        rclpy.init()
+        node = Node('obstacle_object')
+        scene_objects.publish_obstacle(node, lo, hi,
+                                       remove=(args.action == 'remove'))
+        # 되읽어 확인한다 — 발행이 디스커버리 전에 나가면 조용히 사라진다.
+        client = node.create_client(GetPlanningScene, '/get_planning_scene')
+        client.wait_for_service(timeout_sec=10)
+        req = GetPlanningScene.Request()
+        req.components.components = PlanningSceneComponents.WORLD_OBJECT_NAMES
+        fut = client.call_async(req)
+        rclpy.spin_until_future_complete(node, fut, timeout_sec=10)
+        ids = [o.id for o in fut.result().scene.world.collision_objects]
+        here = scene_objects.OBSTACLE_OBJECT_ID in ids
+        want = (args.action == 'add')
+        print(f'씬 확인: 장애물 {"있음" if here else "없음"} '
+              + ('(의도대로)' if here == want else '**의도와 다름**'))
+        node.destroy_node()
+        rclpy.shutdown()
+        if here != want:
+            sys.exit(1)
+        return
+
     owp = load_octomap_file(args.base)
     res = owp.octomap.resolution
     print(f'base: {args.base}')
@@ -703,6 +741,10 @@ def main():
     ob.add_argument('--xyz-min', nargs=3, type=float, default=[0, 0, 0],
                     help='프리셋 대신 직접 지정(add일 때만)')
     ob.add_argument('--xyz-max', nargs=3, type=float, default=[0, 0, 0])
+    ob.add_argument('--as-object', action='store_true',
+                    help='octomap voxel 대신 **collision object**로 넣는다. '
+                         '실물에서는 이쪽만 살아남는다(카메라 갱신과 '
+                         '/clear_octomap에 안 지워진다)')
     ob.set_defaults(func=cmd_obstacle)
 
     args = p.parse_args()

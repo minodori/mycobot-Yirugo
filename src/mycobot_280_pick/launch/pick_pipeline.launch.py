@@ -33,6 +33,19 @@ MoveIt이 실제 장애물을 전혀 못 보니 팔 주변 안전을 사람이 �
 
 `look|armed|bin`도 그대로 받음. 값 검증은 노드 한 곳에서만 하므로(모르는 값이면
 경고 후 BSC), 여기서는 그대로 넘기기만 한다.
+
+[2026-08-02] `harvest_sequence_node`가 이 런치에 들어왔다. 그 전까지는 YOLO가
+`/target_point`를 직접 쏴서 `coord_to_goal_node`가 바로 움직였는데, 그 경로가
+자동 루프 사고의 통로여서 기본으로 껐다(`publish_target_point:=false`).
+**그래서 시퀀스 노드가 없으면 이 런치는 팔을 전혀 안 움직인다.** 수확은
+서비스로 시작한다:
+
+  ros2 service call /start_harvest_sequence std_srvs/srv/Trigger
+
+목표 출처도 여기서 고른다 — YOLO 라이브 검출(기본) 또는 사람이 보정한 파일:
+
+  ros2 launch mycobot_280_pick pick_pipeline.launch.py \
+      target_source:=file targets_file:=bags/lab_bed_detections_fixed.json
 """
 
 import os
@@ -66,6 +79,25 @@ def generate_launch_description():
         )
     )
 
+    ld.add_action(
+        DeclareLaunchArgument(
+            'target_source',
+            default_value='yolo',
+            description=(
+                '수확 목표를 어디서 받나. yolo(기본, look pose 검출 스냅샷) | '
+                'file(targets_file의 보정 좌표). 파일 좌표는 g_base라 TF를 '
+                '안 탄다.'
+            ),
+        )
+    )
+    ld.add_action(
+        DeclareLaunchArgument(
+            'targets_file',
+            default_value='',
+            description='target_source:=file일 때 읽을 좌표 파일'
+                        '(scripts/export_detections.py 출력 형식)',
+        )
+    )
     ld.add_action(
         DeclareLaunchArgument(
             'cycle',
@@ -113,6 +145,21 @@ def generate_launch_description():
             executable='coord_to_goal_node',
             name='coord_to_goal_node',
             parameters=[{'waiting_pose': LaunchConfiguration('cycle')}],
+        )
+    )
+
+    # [2026-08-02] 수확 시퀀스 노드. **이게 있어야 팔이 움직인다** — YOLO의
+    # target_point 직접 발행을 껐기 때문에(위 docstring) 파지 명령을 내는 주체가
+    # 이 노드뿐이다. 시작은 /start_harvest_sequence 서비스.
+    ld.add_action(
+        Node(
+            package='mycobot_280_pick',
+            executable='harvest_sequence_node',
+            name='harvest_sequence_node',
+            parameters=[{
+                'target_source': LaunchConfiguration('target_source'),
+                'targets_file': LaunchConfiguration('targets_file'),
+            }],
         )
     )
 

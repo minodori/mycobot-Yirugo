@@ -19,6 +19,7 @@ import functools
 import math
 import os
 import sys
+import time
 
 print = functools.partial(print, flush=True)
 
@@ -47,16 +48,67 @@ TOMATO_OBJECT_PREFIX = 'tomato_'
 TOMATO_MARGIN_M = 0.010
 
 
-def scene_publisher(node):
+def scene_publisher(node, wait_sec=5.0):
     """PlanningScene 발행자를 노드에 한 번만 만든다.
 
-    DDS 디스커버리가 붙기 전에 쏘면 조용히 사라지므로 만든 직후 잠깐 돈다.
+    DDS 디스커버리가 붙기 전에 쏘면 **조용히 사라진다.** 예전엔 만든 뒤 1초
+    돌고 말았는데, 갓 만든 노드에서 바로 쓰면 그 사이에 move_group이 못 붙어
+    발행이 통째로 증발했다(2026-08-02, 장애물 collision object를 넣었는데
+    씬에 안 남는 것으로 드러남). 그래서 **구독자가 붙을 때까지** 기다린다.
     """
     if not hasattr(node, '_scene_pub'):
         node._scene_pub = node.create_publisher(PlanningScene, '/planning_scene', 10)
-        for _ in range(20):
+        deadline = time.time() + wait_sec
+        while (node._scene_pub.get_subscription_count() == 0
+               and time.time() < deadline):
+            rclpy.spin_once(node, timeout_sec=0.05)
+        for _ in range(10):
             rclpy.spin_once(node, timeout_sec=0.05)
     return node._scene_pub
+
+
+OBSTACLE_OBJECT_ID = 'demo_obstacle'
+
+
+def publish_obstacle(node, xyz_min, xyz_max, remove=False):
+    """[2026-08-02] 데모 장애물을 **collision object**로 넣고 뺀다.
+
+    octomap voxel로 넣는 길(octomap_io.py obstacle)과 목적은 같은데 **실물에서는
+    이쪽만 살아남는다.** octomap 쪽이 실물에서 무효인 이유가 둘이다:
+
+      1. D435 클라우드가 occupancy_map_monitor를 통해 octomap을 계속 갱신한다 —
+         주입한 voxel을 덮어쓴다.
+      2. coord_to_goal_node가 목표마다 `/clear_octomap`을 부른다(문서 5.6b) —
+         지워진다.
+
+    collision object는 둘 중 어느 것에도 안 지워진다. 대신 화면에서는 octomap
+    voxel이 아니라 초록 상자로 보인다(PlanningScene의 Scene Geometry).
+
+    ACM은 건드리지 않는다 — **모든 링크가 이 장애물을 피해야** 데모가 성립한다.
+    (`--octomap-acm`이 그리퍼·손목을 통과시키는 것과 대비된다.)
+    """
+    pub = scene_publisher(node)
+    scene = PlanningScene()
+    scene.is_diff = True
+    obj = CollisionObject()
+    obj.header.frame_id = N.BASE_LINK_NAME
+    obj.id = OBSTACLE_OBJECT_ID
+    obj.operation = CollisionObject.REMOVE if remove else CollisionObject.ADD
+    if not remove:
+        size = [hi - lo for lo, hi in zip(xyz_min, xyz_max)]
+        center = [(lo + hi) / 2.0 for lo, hi in zip(xyz_min, xyz_max)]
+        prim = SolidPrimitive()
+        prim.type = SolidPrimitive.BOX
+        prim.dimensions = [float(v) for v in size]
+        pose = Pose()
+        pose.position.x, pose.position.y, pose.position.z = center
+        pose.orientation.w = 1.0
+        obj.primitives = [prim]
+        obj.primitive_poses = [pose]
+    scene.world.collision_objects.append(obj)
+    pub.publish(scene)
+    for _ in range(20):
+        rclpy.spin_once(node, timeout_sec=0.05)
 
 
 def publish_tomatoes(node, dets, remove=False):
