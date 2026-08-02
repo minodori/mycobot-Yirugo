@@ -672,6 +672,29 @@ def _concat(traj_a, traj_b):
     return out
 
 
+def _reversed(traj):
+    """궤적을 되감은 복사본(재생용). [5/5] 후퇴가 직진의 역이라 그걸 그린다.
+
+    노드의 후퇴는 정렬 위치로 되돌아가는 **같은 직선**이므로(coord_to_goal_node
+    _start_retreat), 직진 궤적의 점 순서만 뒤집으면 그 구간이 된다.
+
+    시간은 **원래 궤적의 시각 배열을 그대로 재사용**한다(오름차순 유지, 위치만
+    역순). 점마다 1초씩 새로 매기면 되감기 구간만 길어져서 재생이 후퇴에
+    잡아먹힌다 — animate_trajectory가 전체 span으로 정규화하기 때문이다.
+    """
+    import copy
+    out = copy.deepcopy(traj)
+    pts = list(out.joint_trajectory.points)
+    times = [copy.deepcopy(p.time_from_start) for p in pts]
+    pts.reverse()
+    for i, pt in enumerate(pts):
+        pt.velocities = []
+        pt.accelerations = []
+        pt.time_from_start = times[i]
+    out.joint_trajectory.points = pts
+    return out
+
+
 def _spin(results):
     """성공한 계획 중 J6(flange 자전) 이동량의 최솟값. 실패뿐이면 무한대."""
     good = [r for r in results if r['ok']]
@@ -679,7 +702,7 @@ def _spin(results):
                default=float('inf'))
 
 
-def _label_lines(pose_label, index, total, d, results):
+def _label_lines(pose_label, index, total, d, results, return_travel=None):
     """화면 라벨 문구.
 
     **공백(스페이스)을 쓰지 말 것. 이게 이 라벨의 유일한 함정이다.**
@@ -706,21 +729,34 @@ def _label_lines(pose_label, index, total, d, results):
     is_a = abs(best['j1_deg']) < 80
     rgb = (0.45, 0.8, 1.0) if is_a else (1.0, 0.62, 0.2)
     j6 = best['travel_by_joint'][N.JOINT_NAMES[5]]
+    last = f'J6:{j6:.0f}:{"A" if is_a else "B-wrap"}:{len(good)}/{len(results)}'
+    if return_travel is not None:
+        last += f':ret{return_travel:.0f}'
     return head + [
         f'trv{best["travel_deg"]:.0f}:J1{best["j1_deg"]:+.0f}',
-        f'J6:{j6:.0f}:{"A" if is_a else "B-wrap"}:{len(good)}/{len(results)}',
+        last,
     ], rgb
 
 
 def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0,
                  pose_label='look pose', display_seconds=3.0, display_repeats=3,
-                 roll_symmetry=False, straight_in=False, acm_only_target=False):
+                 roll_symmetry=False, straight_in=False, acm_only_target=False,
+                 full_cycle=False):
     """모든 목표를 repeat회씩 플래닝하고 행 목록을 돌려준다.
 
     display_pause > 0이면 목표마다 계획 궤적을 /display_planned_path로 발행하고
     그만큼 쉰다 — RViz에서 눈으로 보거나 화면 녹화할 때 쓴다. 이때는 반복 중
     **마지막 성공 궤적**을 보여준다(여러 개를 연달아 쏘면 RViz가 마지막 것만
     재생해서 앞의 것이 안 보인다).
+
+    [2026-08-02] full_cycle이면 **복귀 구간까지 계획해 고리를 닫는다**:
+
+        대기 자세 -> 정렬 -> 직진 -> [후퇴] 정렬 -> [복귀] 대기 자세
+
+    세 가지 사이클(LPC/ASC/BSC)의 차이가 가장 크게 드러나는 곳이 복귀 구간이라,
+    정렬까지만 그리면 세 영상이 "출발 자세만 다른 그림"이 된다. 복귀는 노드와
+    같은 성격(joint goal, _start_return_to_waiting_pose)이므로 plan_to_config로
+    잰다. 목표당 플래닝이 1회 늘어난다.
     """
     rows = []
     status = {}
@@ -774,6 +810,27 @@ def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0,
             if cart:
                 cart_fraction = cart['fraction']
                 cart_traj = cart['trajectory']
+        # [2026-08-02] 복귀 구간 — 화면에 쓰든 안 쓰든 **수치로 남긴다.** 세
+        # 사이클의 차이가 여기 있는데 지금까지 스윕이 안 재던 구간이다.
+        # 출발점은 화면에 그리는 것과 같은 해(J6 최소)여야 한다 — 다른 해에서
+        # 재면 라벨의 정렬 자세와 복귀 비용이 서로 다른 자세의 값이 된다.
+        return_travel = None
+        return_traj = None
+        if full_cycle and good_now:
+            shown_pick = min(good_now,
+                             key=lambda r: (r['travel_by_joint'][N.JOINT_NAMES[5]],
+                                            r['travel_deg']))
+            from_joints = [shown_pick['final'][n] for n in N.JOINT_NAMES]
+            # 정렬 구간과 **같은 집계**로 잰다(반복 중 최소). 처음엔 1회만
+            # 계획했는데, 그러면 이 값만 IK 분기 무작위성에 그대로 노출된다
+            # (함정 6·16 — 두 분기의 비용이 거의 같아 실행마다 갈린다).
+            for _ in range(max(1, repeat)):
+                back = node.plan_to_config(list(node.start_pose),
+                                           from_joints=from_joints)
+                if back['ok'] and (return_travel is None
+                                   or back['travel_deg'] < return_travel):
+                    return_travel = back['travel_deg']
+                    return_traj = back['trajectory']
         if display_pause > 0:
             ok_results = [r for r in results if r['ok']]
             status[index] = 'ok' if ok_results else 'fail'
@@ -792,15 +849,28 @@ def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0,
                 # 화면으로 "어느 방향에서 진입하는가"를 판단할 수 있다.
                 if cart_fraction and cart_fraction > 0.0:
                     show_traj = _concat(show_traj, cart_traj)
+                    # [5/5] 후퇴 = 그 직선을 되돌아 나오는 구간.
+                    if full_cycle:
+                        show_traj = _concat(show_traj, _reversed(cart_traj))
+                # 복귀까지 붙이면 고리가 닫혀 대기 자세로 돌아온다.
+                if full_cycle and return_traj is not None:
+                    show_traj = _concat(show_traj, return_traj)
                 node.publish_trajectory(show_traj, display_seconds)
             node.publish_markers(dets, index, status)
-            lines, rgb = _label_lines(pose_label, index, len(dets), d, results)
+            lines, rgb = _label_lines(pose_label, index, len(dets), d, results,
+                                      return_travel)
             node.publish_status_label(
                 lines, rgb, (d['base_x'], d['base_y'], d['base_z']))
             # 애니메이션을 우리가 직접 돌린다(animate_trajectory 주석). 재생
             # 시간 x 반복 횟수가 그대로 이 목표에 머무는 시간이 된다.
+            #
+            # [2026-08-02] **show_traj를 넘긴다** — 예전엔 shown['trajectory']
+            # (정렬 구간만)를 넘기고 있었다. 이어 붙인 궤적은 publish_trajectory
+            # 로만 나가는데 그건 RViz의 Trajectory 디스플레이용이고 그 디스플레이는
+            # 꺼져 있는 것이 정상이라(8절), **--straight-in을 줘도 화면에는 직진이
+            # 안 보였다.** 이걸 안 고치면 --full-cycle도 같은 이유로 안 보인다.
             if ok_results:
-                node.animate_trajectory(shown['trajectory'],
+                node.animate_trajectory(show_traj,
                                         display_seconds, display_repeats)
             t_end = time.time() + hold
             while time.time() < t_end:
@@ -822,6 +892,11 @@ def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0,
             'travel_mean_deg': round(statistics.fmean(travel), 0) if travel else None,
             'travel_sd_deg': round(statistics.pstdev(travel), 0) if len(travel) > 1 else 0,
             'plan_s_mean': round(statistics.fmean(plan_s), 3) if plan_s else None,
+            # [2026-08-02] 정렬 -> 대기 자세 복귀 이동량. 세 사이클(LPC/ASC/BSC)의
+            # 차이가 여기 있는데 지금까지 스윕이 안 재던 값이다. --full-cycle일
+            # 때만 채워진다.
+            'return_travel_deg': (None if return_travel is None
+                                  else round(return_travel, 0)),
         }
         rows.append(row)
         if verbose:
@@ -833,10 +908,12 @@ def evaluate_all(node, dets, repeat, verbose=True, display_pause=0.0,
             spin_txt = f'J6 {spin:.0f}°' if spin != float('inf') else 'J6 —'
             frac_txt = ('' if cart_fraction is None
                         else f'  직진 {100*cart_fraction:.0f}%')
+            ret_txt = ('' if return_travel is None
+                       else f'  복귀 {return_travel:.0f}°')
             print(f'{d.get("class_name", "?"):<8} z={d["base_z"]:.3f}  '
                   f'성공 {len(good)}/{repeat}  {j1_txt}  {spin_txt}  '
                   f'이동량 {row["travel_mean_deg"] or 0:.0f}°±{row["travel_sd_deg"]:.0f}  '
-                  f'플래닝 {row["plan_s_mean"] or 0:.2f}s' + frac_txt)
+                  f'플래닝 {row["plan_s_mean"] or 0:.2f}s' + frac_txt + ret_txt)
     return rows
 
 
@@ -1001,6 +1078,20 @@ def main():
                    metavar=('J1', 'J2', 'J3', 'J4', 'J5', 'J6'),
                    help='시작 자세를 **도 단위** 6개로 지정(기본: look pose). '
                         'armed pos 후보 평가용 — 노드는 고치지 않아도 된다')
+    # [2026-08-02] 세 가지 수확 사이클을 이름으로 고른다. 값과 이름의 단일
+    # 출처는 노드의 WAITING_POSES다 — 여기서 관절값을 따로 적으면 노드와
+    # 어긋나는 순간 화면과 수치가 조용히 갈린다.
+    p.add_argument('--cycle', choices=sorted(
+                       set(N.CYCLE_ALIASES) | set(N.WAITING_POSES)),
+                   default=None,
+                   help='수확 사이클 = 시작(대기) 자세. lpc(look) | asc(armed) | '
+                        'bsc(통 자세). --start-pose 대신 쓴다')
+    # [2026-08-02] 한 사이클을 닫아서 재생한다. 세 방식의 차이가 가장 크게
+    # 드러나는 곳이 **복귀 구간**이라, 정렬까지만 보여주면 세 영상이 "출발
+    # 자세만 다른 그림"이 된다.
+    p.add_argument('--full-cycle', action='store_true',
+                   help='대기->정렬->직진->후퇴->복귀를 이어 재생하고 복귀 '
+                        '이동량을 같이 찍는다(목표당 플래닝 1회 추가)')
     p.add_argument('--collect-solutions', type=str, default=None,
                    metavar='OUT.json',
                    help='목표별 정렬 관절해를 모아 JSON으로 저장(armed pos 도출용)')
@@ -1054,6 +1145,19 @@ def main():
 
     with open(args.targets, encoding='utf-8') as fh:
         dets = json.load(fh)['detections']
+
+    # [2026-08-02] --cycle은 --start-pose의 이름 붙은 버전이다. 둘을 같이 주면
+    # **에러로 막는다** — 어느 쪽이 이겼는지 모르는 채로 수치가 나오면 함정 15
+    # ("조건을 결과에 반드시 같이 적을 것")를 그대로 다시 밟는다.
+    if args.cycle and args.start_pose:
+        raise SystemExit('--cycle과 --start-pose는 같이 줄 수 없다 — '
+                         '어느 자세로 잰 값인지 모호해진다(함정 15)')
+    if args.cycle:
+        key = N.CYCLE_ALIASES.get(args.cycle, args.cycle)
+        joints, name, short = N.WAITING_POSES[key]
+        args.start_pose = [math.degrees(v) for v in joints]
+        print(f'사이클: {short} — 대기 자세 {name} '
+              f'({", ".join(f"{math.degrees(v):+.1f}" for v in joints)}도)')
 
     start_pose = ([math.radians(v) for v in args.start_pose]
                   if args.start_pose else None)
@@ -1120,22 +1224,30 @@ def main():
           f'(플래닝 시간 {args.planning_time}s, 시도 {args.attempts}회)')
     # 노드가 쓰는 상수와 대조해 이름을 붙인다. 화면 라벨에 관절값 6개가 뜨면
     # "지금 보고 있는 게 armed pose인가"를 읽어낼 수 없다.
+    #
+    # [2026-08-02] 대조 대상을 N.WAITING_POSES로 바꿨다 — 예전엔 look/armed만
+    # 알아서 통 자세로 돌리면 라벨에 관절값 6개가 그대로 떴다. 그리고 화면용과
+    # 터미널용을 나눈다: **RViz 라벨은 ASCII만 쓸 수 있다**(함정 14 — 폰트
+    # 아틀라스가 33~166만 담아서 한글도 `°`도 안 보이는데 자리는 차지한다).
     def _pose_label(start_pose_deg):
-        if not start_pose_deg:
-            return 'look pose'
-        rad = [math.radians(v) for v in start_pose_deg]
-        for name, ref in (('look pose', N.LOOK_POSE_JOINT_POSITIONS),
-                          ('armed pose', N.ARMED_POSE_JOINT_POSITIONS)):
-            if all(abs(a - b) < 1e-3 for a, b in zip(rad, ref)):
-                return name
-        return '[' + ', '.join(f'{v:+.1f}' for v in start_pose_deg) + ']°'
+        """(화면용 ASCII, 터미널용) 짝을 돌려준다."""
+        rad = ([math.radians(v) for v in start_pose_deg] if start_pose_deg
+               else list(N.LOOK_POSE_JOINT_POSITIONS))
+        for key, (joints, name, short) in N.WAITING_POSES.items():
+            if all(abs(a - b) < 1e-3 for a, b in zip(rad, joints)):
+                return f'{short}:{key}', f'{name} ({short})'
+        joints_txt = '_'.join(f'{v:+.0f}' for v in start_pose_deg)
+        return joints_txt, ('[' + ', '.join(f'{v:+.1f}' for v in start_pose_deg)
+                            + ']도')
 
-    pose_label = _pose_label(args.start_pose)
+    pose_label, pose_label_full = _pose_label(args.start_pose)
     if args.label_scale is not None:
         node.LABEL_SCALE = args.label_scale
     if args.label_pos is not None:
         node.LABEL_ANCHOR = tuple(args.label_pos)
-    print(f'시작 자세: {pose_label} 고정 / 측정 구간: 시작 자세 -> 정렬 위치\n')
+    span = ('시작 자세 -> 정렬 -> 직진 -> 후퇴 -> 복귀(한 사이클)'
+            if args.full_cycle else '시작 자세 -> 정렬 위치')
+    print(f'시작 자세: {pose_label_full} 고정 / 재생·측정 구간: {span}\n')
 
     if args.collect_solutions:
         collect_solutions(node, dets, args.repeat, args.collect_solutions)
@@ -1169,7 +1281,8 @@ def main():
                                     display_repeats=args.display_repeats,
                                     roll_symmetry=args.roll_symmetry,
                                     straight_in=args.straight_in,
-                                    acm_only_target=args.tomato_acm_target_only)
+                                    acm_only_target=args.tomato_acm_target_only,
+                                    full_cycle=args.full_cycle)
                 # 다음 회차 전에 마커 색을 초기화한다 — 안 그러면 전부 초록/회색인
                 # 채로 시작해 "지금 어디를 보고 있는지"가 안 보인다.
                 node.publish_markers(dets)
@@ -1179,7 +1292,8 @@ def main():
         rows = evaluate_all(node, dets, args.repeat,
                             roll_symmetry=args.roll_symmetry,
                             straight_in=args.straight_in,
-                            acm_only_target=args.tomato_acm_target_only)
+                            acm_only_target=args.tomato_acm_target_only,
+                            full_cycle=args.full_cycle)
 
     planned = [r for r in rows if r.get('trials')]
     total_trials = sum(r['trials'] for r in planned)
@@ -1203,6 +1317,16 @@ def main():
         if b:
             print(f'    B: {min(b):.1f}~{max(b):.1f}° (평균 {statistics.fmean(b):.1f}) '
                   f'<- 뒤로 감는 분기')
+
+    # [2026-08-02] 세 사이클 비교용. 정렬 이동량은 목표별 평균의 중앙값이고
+    # 복귀는 구간별 최소 1회이므로 **집계가 다르다** — 문서 6.1절의 "목표별
+    # 최소의 중앙값"과 섞어 인용하지 말 것(함정 3·15).
+    ret_all = [r['return_travel_deg'] for r in planned
+               if r.get('return_travel_deg') is not None]
+    if ret_all:
+        print(f'  복귀(정렬 -> {pose_label_full}) 중앙 '
+              f'{statistics.median(ret_all):.0f}° / 합 {sum(ret_all):.0f}° '
+              f'({len(ret_all)}개 목표)')
 
     if args.csv:
         import csv

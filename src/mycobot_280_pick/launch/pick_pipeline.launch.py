@@ -21,6 +21,18 @@ launch.py로 그대로 전달됨) — 그리퍼 근접거리 self-filter 잔여 
 "알려진 문제" 참고)이 harvest 검증을 자꾸 막을 때 사용. 이 모드에서는
 MoveIt이 실제 장애물을 전혀 못 보니 팔 주변 안전을 사람이 직접 확인할 것.
   ros2 launch mycobot_280_pick pick_pipeline.launch.py enable_octomap:=false
+
+[2026-08-02] `cycle:=`로 **수확 사이클의 종류**를 고를 수 있음. 대기 자세를
+무엇으로 두느냐가 곧 사이클의 종류다(coord_to_goal_node의 WAITING_POSES 참고):
+
+  cycle:=bsc   Bin-Staged   수확통 위에서 대기하며 거기서 놓는다 (기본)
+  cycle:=asc   Armed-Staged armed pose에서 대기 (2026-08-01)
+  cycle:=lpc   Look-Parked  목표마다 look pose로 복귀 (원판)
+
+  ros2 launch mycobot_280_pick pick_pipeline.launch.py cycle:=asc
+
+`look|armed|bin`도 그대로 받음. 값 검증은 노드 한 곳에서만 하므로(모르는 값이면
+경고 후 BSC), 여기서는 그대로 넘기기만 한다.
 """
 
 import os
@@ -50,6 +62,18 @@ def generate_launch_description():
             description=(
                 "false면 Octomap 장애물 회피 파이프라인을 건너뜀 — harvest "
                 "파이프라인만 먼저 검증하고 싶을 때 사용(모듈 docstring 참고)."
+            ),
+        )
+    )
+
+    ld.add_action(
+        DeclareLaunchArgument(
+            'cycle',
+            default_value='bsc',
+            description=(
+                '수확 사이클의 종류 = 대기 자세. bsc(수확통, 기본) | asc(armed) | '
+                'lpc(look). look|armed|bin도 받음. 노드의 waiting_pose 파라미터로 '
+                '그대로 넘어가고 검증도 거기서 한다.'
             ),
         )
     )
@@ -88,6 +112,7 @@ def generate_launch_description():
             package='mycobot_280_pick',
             executable='coord_to_goal_node',
             name='coord_to_goal_node',
+            parameters=[{'waiting_pose': LaunchConfiguration('cycle')}],
         )
     )
 

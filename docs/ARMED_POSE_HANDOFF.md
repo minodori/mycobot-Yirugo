@@ -749,7 +749,52 @@ N회 중 최소"로 고르면 어느 쪽이 이길지가 실행마다 갈리고,
 > **[2026-08-02 갱신] 7절 남은 일 1번을 구현했다.** 대기 자세가 armed pose에서
 > **통 자세**로 바뀌었고, 그 자리에서 열매를 놓는다. 아래는 그 이후의 상태다.
 
-### 3.1 사이클 구조
+### 3.0 세 가지 사이클 — 이름과 고르는 법 (2026-08-02)
+
+대기 자세를 무엇으로 두느냐가 곧 **사이클의 종류**다. 이 프로젝트가 지금까지 세
+가지를 만들었고, 사용자가 이름을 붙였다:
+
+| 이름 | 뜻 | 대기 자세 | 통에 놓나 | 언제 |
+|---|---|---|---|---|
+| **LPC** | Look-Parked Cycle | look pose | 아니오 | 원판 |
+| **ASC** | Armed-Staged Cycle | armed pose | 아니오 | 2026-08-01 |
+| **BSC** | Bin-Staged Cycle | 통 자세 | **예** | 2026-08-02, 현재 기본 |
+
+고르는 법 — **세 자리 모두 같은 이름을 쓴다**:
+
+```bash
+# 실물 파이프라인
+ros2 launch mycobot_280_pick pick_pipeline.launch.py cycle:=asc
+# 노드만
+ros2 run mycobot_280_pick coord_to_goal_node --ros-args -p waiting_pose:=asc
+# 측정 스윕 (관절 6개를 타이핑하지 않아도 된다)
+python3 -u scripts/sweep_targets_planned.py --cycle asc ...
+```
+
+관절값·이름의 **단일 출처는 `coord_to_goal_node.WAITING_POSES`**다. 스윕도 거기서
+읽으므로 자세를 바꾸면 화면 라벨과 수치가 같이 따라온다(예전엔 스크립트가 상수를
+따로 참조해서, 통 자세를 추가했을 때 라벨에 자세 이름 대신 관절값 6개가 떴다).
+기존 값 `look|armed|bin`도 그대로 받는다 — 약칭은 별칭일 뿐이다.
+
+#### 세 사이클을 한 세션에서 나란히 (2026-08-02)
+
+`--cycle`을 갈아 끼우며 세 번 돌린 값이다. 열매+octomap+벽, **octomap ACM 완화**,
+반복 10회, 한 사이클 전체(`--full-cycle`):
+
+| 사이클 | 성공률 | 정렬 이동량 중앙 | 복귀 이동량 중앙 | 복귀 합 | 직진 ≥0.95 |
+|---|---|---|---|---|---|
+| LPC | 100% | 509° | 496° | 7753° | 13/15 |
+| ASC | 100% | 461° | 477° | 7465° | 13/15 |
+| **BSC** | 100% | **362°** | **460°** | **6247°** | **14/15** |
+
+정렬 −21%(vs LPC), 복귀 합 −19%. **10절의 사슬 결과(BSC가 A 대비 −28.8%)와 방향이
+같다.** 성공률·도달은 셋이 같으므로, 세 방식의 차이는 도달성이 아니라 **비용**이다.
+
+> **유효 범위**: 정렬은 목표별 *평균*의 중앙값, 복귀는 목표별 *최소*라 집계가
+> 다르다 — 6.1절의 373°(목표별 최소의 중앙값)와 **섞어 빼지 말 것.** 그리고 이
+> 값은 ACM 완화를 켠 조건이다(함정 15·17).
+
+### 3.1 사이클 구조 (BSC 기준)
 
 ```
 look pose                     관측(스냅샷) — 시퀀스당 1회
@@ -776,12 +821,16 @@ look pose                     다음 관측 준비
 
 **되돌리기**(재빌드 불필요):
 
-| 명령 | 결과 |
-|---|---|
-| `-p waiting_pose:=armed` | 2026-08-01의 armed pose 대기. **통에 놓지 않는다**(열매를 쥔 채 대기) |
-| `-p waiting_pose:=look` (= `-p use_armed_pose:=false`) | armed pose 도입 이전 동작. `[0/5]` 경유도 없다 |
+| 명령 | 사이클 | 결과 |
+|---|---|---|
+| `-p waiting_pose:=asc` (= `armed`) | ASC | 2026-08-01의 armed pose 대기. **통에 놓지 않는다**(열매를 쥔 채 대기) |
+| `-p waiting_pose:=lpc` (= `look`, = `-p use_armed_pose:=false`) | LPC | armed pose 도입 이전 동작. `[0/5]` 경유도 없다 |
 
-`use_armed_pose`는 옛 스위치라 **끄는 쪽으로만** 계속 받는다(false → look).
+`use_armed_pose`는 옛 스위치라 **끄는 쪽으로만** 계속 받는다(false → LPC).
+모르는 값을 주면 경고 후 BSC로 진행한다.
+
+런치도 같다: `ros2 launch mycobot_280_pick pick_pipeline.launch.py cycle:=asc`.
+값 검증은 **노드 한 곳에서만** 한다 — 런치는 그대로 넘기기만 한다.
 
 ### 3.3 통에서 놓기 — 실패하면 어떻게 되나
 
@@ -1288,7 +1337,7 @@ standoff 자체는 무죄다 — 20 mm에서 3/12, 30 mm에서 4/13으로 차이
 | `scene_objects.py` | 토마토 구 등록 + ACM 완화 공용 헬퍼(`allow_gripper_octomap_collisions`로 octomap 쪽 완화도 토글, `allow_gripper_tomato_collisions(..., only=i)`로 **그 열매만** 완화 — 함정 17). `find_armed_pose_cartesian`과 `eval_bed_scene`이 **같은 씬**을 만들도록 한 곳에 모은 것 |
 | `find_armed_pose_cartesian.py` | **armed pose 재도출.** 토마토 씬 + ACM + 작업공간 안전 조건. 단일/타겟별 비교 포함 |
 | `find_armed_pose.py` | 1차(관절공간) 방식. **폐기했지만 반례로 남겨둠** |
-| `sweep_targets_planned.py` | 목표별 플래닝 평가. `--start-pose`, `--standoff`(A/B용 덮어쓰기), `--straight-in`([3/5] 직진까지 계획·재생하고 fraction 출력), `--roll-symmetry`, `--tomatoes`, `--tomato-acm-target-only`(이웃 열매를 장애물로 남긴다 — 함정 17), `--octomap FILE`, `--collect-solutions`, `--display-pause`, `--display-loop`, `--sweep-orientation-deg` |
+| `sweep_targets_planned.py` | 목표별 플래닝 평가. `--start-pose`, `--standoff`(A/B용 덮어쓰기), `--straight-in`([3/5] 직진까지 계획·재생하고 fraction 출력), `--roll-symmetry`, `--cycle lpc\|asc\|bsc`(사이클 = 출발 자세, 3.0절), `--full-cycle`(후퇴·복귀까지 이어 재생하고 복귀 이동량을 찍는다), `--tomatoes`, `--tomato-acm-target-only`(이웃 열매를 장애물로 남긴다 — 함정 17), `--octomap FILE`, `--collect-solutions`, `--display-pause`, `--display-loop`, `--sweep-orientation-deg` |
 | `eval_round_trip.py` | 왕복 비용(가는 길 + 오는 길)을 분기별로 |
 | `eval_bin_release.py` | 수확통 놓기. `--with-bin-collision`, `--bin-rim` 스윕 |
 | `sweep_bed_offline.py --targets` | 기하 게이트만(ROS 불필요). **상한이지 예측이 아니다** — 15/15 통과인데 실제 플래닝은 그보다 낮다 |
@@ -1354,28 +1403,47 @@ rviz2 -d src/mycobot_280_pick/config/sweep_view.rviz
 
 > `Trajectory` 디스플레이는 **꺼져 있는 것이 정상**이다. 재생은 스크립트가
 > 직접 그린다(함정 14 옆의 설명). 켜면 두 벌이 겹쳐 재생된다.
+>
+> **[2026-08-02] 그래서 버그가 하나 숨어 있었다.** 직진 구간을 이어 붙인 궤적이
+> `publish_trajectory`(= 꺼져 있는 Trajectory 디스플레이)로만 나가고, 실제로
+> 그리는 `animate_trajectory`에는 **정렬 구간만** 넘어가고 있었다 — `--straight-in`을
+> 줘도 화면에는 직진이 안 보였다는 뜻이다. 이어 붙인 궤적을 넘기도록 고쳤다.
 
 #### 3) 스윕 돌리기 (터미널 C)
 
-**가장 실물에 가까운 조합** — 열매 + 녹화 octomap + 벽, armed pose 출발,
-정렬에 이어 [3/5] 직진까지 재생:
+**가장 실물에 가까운 조합** — 열매 + 녹화 octomap + 벽, 현재 사이클(BSC) 출발,
+한 사이클 전체를 재생:
 
 ```bash
 python3 -u scripts/sweep_targets_planned.py \
     --repeat 5 --orientation-tolerance 0.2 \
     --tomatoes --octomap bags/bed_look_octomap_wall.bin \
-    --start-pose 40 104.06 -56.68 -50 15.99 1.4 \
-    --straight-in \
+    --cycle bsc --straight-in --full-cycle \
     --display-pause 1.0 --display-seconds 6 --display-repeats 3 --display-loop 0
+```
+
+**세 사이클을 눈으로 비교하려면 `--cycle`만 갈아 끼운다**(3.0절) — 같은 스택
+안에서 연달아 돌려야 비교가 성립한다(함정 10):
+
+```bash
+for c in lpc asc bsc; do
+  python3 -u scripts/sweep_targets_planned.py --repeat 5 --orientation-tolerance 0.2 \
+      --tomatoes --octomap bags/bed_look_octomap_wall.bin --octomap-acm \
+      --cycle $c --straight-in --full-cycle \
+      --display-pause 1.0 --display-seconds 6 --display-repeats 2 --display-loop 1
+done
 ```
 
 | 옵션 | 뜻 |
 |---|---|
-| `--tomatoes` | 열매 15개를 구로 넣고 ACM을 푼다(함정 4) |
+| `--tomatoes` | 열매 15개를 구로 넣고 ACM을 푼다 — **열매 전부에 걸린다**(함정 4·17) |
+| `--tomato-acm-target-only` | 목표 하나만 완화해 **이웃 회피를 재게** 한다(함정 17) |
 | `--octomap FILE` | 녹화 장면 octomap 주입 |
-| `--octomap-acm` | **여기 없다.** 붙이면 그리퍼가 줄기 voxel을 스쳐도 되게 한다(6.3절). 붙인 값과 안 붙인 값을 **섞어 보고하지 말 것** |
-| `--start-pose` | armed pose. 빼면 look pose에서 출발 |
+| `--octomap-acm` | 붙이면 그리퍼가 줄기 voxel을 스쳐도 되게 한다(6.3절). 붙인 값과 안 붙인 값을 **섞어 보고하지 말 것** |
+| `--cycle lpc\|asc\|bsc` | 사이클 = 출발(대기) 자세. `--start-pose`와 **같이 주면 에러**(어느 자세로 잰 값인지 모호해진다) |
+| `--start-pose` | 관절 6개 직접 지정. 족(族)을 훑을 때만 쓴다 |
 | `--straight-in` | [3/5] 직진 접근까지 계획해 이어 재생하고 fraction을 찍는다 |
+| `--full-cycle` | 후퇴·복귀까지 이어 붙여 **고리를 닫는다.** 복귀 이동량도 같이 찍는다 |
 | `--display-seconds 6` | 재생 1회 6초. **크게 줄수록 느리다** |
 | `--display-repeats 3` | 목표당 3회 반복 |
 | `--display-loop 0` | Ctrl+C까지 무한 반복 |
@@ -1508,6 +1576,7 @@ z는 **±5mm로 못박아** 놓는 높이를 후보 단계에서 고정할 것(1
 | `bags/armed_chain_acm.csv` / `bags/armed_chain_bin.csv` | 1.5절 사슬 비용(통 없음 / 통 포함) |
 | `bags/bin_pose.json` | **10절 채택 통 자세.** 관절값·FK·끝단·여유·전이합과 탈락한 후보들까지. 노드의 `BIN_POSE_JOINT_POSITIONS`가 이 값이다 |
 | `bags/armed_chain_binpose.csv` | 10절 사슬 A/B1/B2/C/**D**(고정 통 자세, 반복 10회) |
+| `bags/cycle_lpc.csv` / `cycle_asc.csv` / `cycle_bsc.csv` | 3.0절 세 사이클 대조(반복 10회, `--full-cycle`). `return_travel_deg` 열이 복귀 구간 |
 | `bags/bed_look_octomap_pad02.bin` | 같은 장면 padding 0.2(voxel 1062개). **열매가 섞여 들어간 것이라 그대로 쓰면 안 된다 — 함정 11** |
 | `bags/bed_scene_eval_r30.csv` | 5.3절 원자료(씬 4 × 자세 2 × 목표 15). `_summary.csv`는 조합별 요약 |
 | `bags/bed_scene_eval_pad02_r30.csv` | 함정 11의 근거(padding 0.2) |

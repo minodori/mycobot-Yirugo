@@ -263,6 +263,28 @@ BIN_POSE_JOINT_POSITIONS = [
     -0.073897,   #   -4.23도
 ]
 
+# [2026-08-02] 대기 자세를 무엇으로 두느냐가 곧 **수확 사이클의 종류**다.
+# 이 프로젝트가 지금까지 세 가지를 만들어 왔고, 사용자가 이름을 붙였다:
+#
+#   LPC  Look-Parked Cycle    목표마다 look pose로 복귀 — 원판
+#   ASC  Armed-Staged Cycle   armed pose에서 대기 (2026-08-01)
+#   BSC  Bin-Staged Cycle     수확통 위에서 대기하며 거기서 놓는다 (2026-08-02)
+#
+# **이 표가 세 방식의 단일 출처다.** 측정 스크립트도 여기를 import해서 쓴다
+# (scripts/sweep_targets_planned.py --cycle) — 예전엔 스크립트마다 관절 상수를
+# 따로 참조해서, 통 자세를 추가했을 때 화면 라벨이 자세 이름 대신 관절값 6개를
+# 찍는 식으로 어긋났다.
+WAITING_POSES = {
+    # 키:      (관절값,                     사람이 읽는 이름, 약칭)
+    'look':  (LOOK_POSE_JOINT_POSITIONS,  'look pose',  'LPC'),
+    'armed': (ARMED_POSE_JOINT_POSITIONS, 'armed pose', 'ASC'),
+    'bin':   (BIN_POSE_JOINT_POSITIONS,   '통 자세',     'BSC'),
+}
+
+# 약칭으로도 고를 수 있게 한다. 기존 값(look|armed|bin)은 문서와 이전 명령이
+# 쓰고 있으므로 **그대로 살리고 별칭만 얹는다.**
+CYCLE_ALIASES = {'lpc': 'look', 'asc': 'armed', 'bsc': 'bin'}
+
 # 팔이 이미 대기 자세에 있다고 볼 허용 오차(rad). 이 안이면 경유를 건너뛴다.
 # LOOK_POSE_TOLERANCE_RAD(0.08)와 같은 기준 — 실물 정지 오차와 컨트롤러
 # tolerance를 감안한 값이다.
@@ -1098,29 +1120,32 @@ class CoordToGoalNode(Node):
             .get_parameter_value()
             .bool_value
         )
-        # [2026-08-02] 대기 자세를 무엇으로 할 것인가.
+        # [2026-08-02] 대기 자세 = 수확 사이클의 종류(위 WAITING_POSES 참고).
         #
-        #   bin   (기본) 수확통 위 = 놓는 자세 겸 대기 자세. 전이 -30.6%
-        #                (BIN_POSE_JOINT_POSITIONS 주석 참고). 여기서만 파지한
+        #   bin  (= bsc, 기본) 수확통 위 = 놓는 자세 겸 대기 자세. 전이 -30.6%
+        #                (BIN_POSE_JOINT_POSITIONS 주석 참고). **여기서만** 파지한
         #                열매를 실제로 통에 놓는다.
-        #   armed 2026-08-01의 armed pose. 통에 놓지 않는다(열매를 쥔 채 대기).
-        #   look  armed pose 도입 이전의 원래 동작.
+        #   armed (= asc) 2026-08-01의 armed pose. 통에 놓지 않는다(쥔 채 대기).
+        #   look  (= lpc) armed pose 도입 이전의 원래 동작.
         #
         # 실물에서 문제가 나면 재빌드 없이 되돌릴 수 있어야 한다:
-        #   ros2 run ... coord_to_goal_node --ros-args -p waiting_pose:=armed
+        #   ros2 run ... coord_to_goal_node --ros-args -p waiting_pose:=asc
+        #   ros2 launch mycobot_280_pick pick_pipeline.launch.py cycle:=asc
         self.declare_parameter('waiting_pose', 'bin')
         # [구] use_armed_pose — 2026-08-01의 되돌리기 스위치. waiting_pose가
         # 생기면서 역할이 흡수됐지만, 이 인자를 그대로 쓰는 런치/문서가 있어
         # **끄는 쪽으로만** 계속 받는다(false = 옛 look pose 동작).
         self.declare_parameter('use_armed_pose', True)
-        mode = (
+        requested = (
             self.get_parameter('waiting_pose').get_parameter_value().string_value
             or 'bin'
         ).strip().lower()
-        if mode not in ('bin', 'armed', 'look'):
+        mode = CYCLE_ALIASES.get(requested, requested)
+        if mode not in WAITING_POSES:
             self.get_logger().warn(
-                f"waiting_pose:={mode}는 모르는 값 — 'bin'으로 진행함 "
-                "(bin | armed | look 중 하나)"
+                f"waiting_pose:={requested}는 모르는 값 — 'bin'(BSC)으로 진행함 "
+                f"(고를 수 있는 값: {' | '.join(WAITING_POSES)} 또는 "
+                f"{' | '.join(CYCLE_ALIASES)})"
             )
             mode = 'bin'
         if mode == 'bin' and not self.get_parameter(
@@ -1130,14 +1155,8 @@ class CoordToGoalNode(Node):
             # look pose 복귀로 간다.
             mode = 'look'
         self._waiting_pose_mode = mode
-        self._waiting_pose_joints = {
-            'bin': BIN_POSE_JOINT_POSITIONS,
-            'armed': ARMED_POSE_JOINT_POSITIONS,
-            'look': LOOK_POSE_JOINT_POSITIONS,
-        }[mode]
-        self._waiting_pose_label = {
-            'bin': '통 자세', 'armed': 'armed pose', 'look': 'look pose',
-        }[mode]
+        (self._waiting_pose_joints, self._waiting_pose_label,
+         self._cycle_name) = WAITING_POSES[mode]
         # 통 자세일 때만, 파지한 열매를 대기 자세에서 놓는다(그리퍼 열기).
         self._release_at_waiting_pose = (mode == 'bin')
         self._return_pose_label = self._waiting_pose_label
@@ -1145,8 +1164,11 @@ class CoordToGoalNode(Node):
         # 쓴다. 파지 전에 중단된 사이클(_abort_to_return)은 빈 그리퍼라
         # 놓기 단계를 건너뛰어야 한다.
         self._holding_object = False
+        # 약칭과 파라미터 값을 **같이** 찍는다 — 로그만 보고 어느 사이클인지
+        # 판정할 수 있어야 조건이 다른 두 실행을 섞어 읽는 사고를 막는다.
         self.get_logger().info(
-            f'대기 자세: {self._waiting_pose_label} (waiting_pose:={mode})'
+            f'대기 자세: {self._waiting_pose_label} '
+            f'({self._cycle_name}, waiting_pose:={mode})'
             + ('. 파지한 열매는 이 자리에서 통에 놓는다.'
                if self._release_at_waiting_pose else '')
         )
