@@ -1378,6 +1378,7 @@ standoff 자체는 무죄다 — 20 mm에서 3/12, 30 mm에서 4/13으로 차이
 | `sweep_targets_planned.py` | 목표별 플래닝 평가. `--start-pose`, `--standoff`(A/B용 덮어쓰기), `--straight-in`([3/5] 직진까지 계획·재생하고 fraction 출력), `--roll-symmetry`, `--cycle lpc\|asc\|bsc`(사이클 = 출발 자세, 3.0절), `--full-cycle`(후퇴·복귀까지 이어 재생하고 복귀 이동량을 찍는다), `--tomatoes`, `--tomato-acm-target-only`(이웃 열매를 장애물로 남긴다 — 함정 17), `--octomap FILE`, `--collect-solutions`, `--display-pause`, `--display-loop`, `--sweep-orientation-deg` |
 | `eval_round_trip.py` | 왕복 비용(가는 길 + 오는 길)을 분기별로 |
 | `eval_bin_release.py` | 수확통 놓기. `--with-bin-collision`, `--bin-rim` 스윕 |
+| `demo_obstacle_ab.py` | **장애물 유무 A/B 데모(녹화용).** 목표를 고정하고 장애물만 번갈아 넣어 경로 차이를 화면으로 보여준다. `--target`, `--preset pillar\|wall\|both`, `--cycle`. 장애물은 collision object라 재생 중에도 실물에서도 안 지워진다 |
 | `sweep_bed_offline.py --targets` | 기하 게이트만(ROS 불필요). **상한이지 예측이 아니다** — 15/15 통과인데 실제 플래닝은 그보다 낮다 |
 
 ### 실행 순서 — 직접 해보기

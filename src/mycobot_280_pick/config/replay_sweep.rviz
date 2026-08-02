@@ -84,7 +84,11 @@ Visualization Manager:
       Move Group Namespace: ""
       Planning Scene Topic: /monitored_planning_scene
       Scene Geometry:
-        Scene Alpha: 0.9
+        # [2026-08-03] 0.9 -> 0.35. 토마토 collision object가 검출 반지름
+        # +10mm짜리 구라 0.9에서는 **실제 포인트클라우드 토마토를 덮는다**
+        # (녹화 중 지적). 낮추면 뒤가 비쳐서 "플래너가 보는 구"와 "진짜 열매"가
+        # 같이 보인다. RViz GUI에서 실시간으로 더 조절할 수 있다.
+        Scene Alpha: 0.35
         Show Scene Geometry: true
         Voxel Coloring: Z-Axis
         Voxel Rendering: Occupied Voxels

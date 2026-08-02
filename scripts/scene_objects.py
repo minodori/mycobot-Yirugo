@@ -68,9 +68,11 @@ def scene_publisher(node, wait_sec=5.0):
 
 
 OBSTACLE_OBJECT_ID = 'demo_obstacle'
+WALL_OBJECT_ID = 'demo_wall'
 
 
-def publish_obstacle(node, xyz_min, xyz_max, remove=False):
+def publish_obstacle(node, xyz_min, xyz_max, remove=False,
+                     object_id=OBSTACLE_OBJECT_ID):
     """[2026-08-02] 데모 장애물을 **collision object**로 넣고 뺀다.
 
     octomap voxel로 넣는 길(octomap_io.py obstacle)과 목적은 같은데 **실물에서는
@@ -92,7 +94,7 @@ def publish_obstacle(node, xyz_min, xyz_max, remove=False):
     scene.is_diff = True
     obj = CollisionObject()
     obj.header.frame_id = N.BASE_LINK_NAME
-    obj.id = OBSTACLE_OBJECT_ID
+    obj.id = object_id
     obj.operation = CollisionObject.REMOVE if remove else CollisionObject.ADD
     if not remove:
         size = [hi - lo for lo, hi in zip(xyz_min, xyz_max)]

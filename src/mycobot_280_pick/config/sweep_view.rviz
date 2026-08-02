@@ -85,7 +85,9 @@ Visualization Manager:
       Robot Description: robot_description
       Planning Scene Topic: /monitored_planning_scene
       Scene Geometry:
-        Scene Alpha: 0.7
+        # [2026-08-03] 0.7 -> 0.35. replay_sweep.rviz와 같은 이유 —
+        # 토마토 collision object(검출 반지름 +10mm)가 실제 열매를 덮는다.
+        Scene Alpha: 0.35
         Scene Display Time: 0.01
         Show Scene Geometry: true
         Voxel Rendering: Occupied Voxels

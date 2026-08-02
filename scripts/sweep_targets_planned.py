@@ -334,6 +334,14 @@ class PlanProbe(Node):
         last = pts[-1].time_from_start if pts else None
         return (last.sec + last.nanosec * 1e-9) if last else 0.0
 
+    # [2026-08-03] 마커 투명도. 화면 녹화 때 이 구가 **실제 포인트클라우드
+    # 토마토를 덮어** 안 보인다는 지적이 있었다. 0으로 두면 사실상 사라진다.
+    # (PlanningScene의 collision object 구는 별개다 — 그쪽은 RViz의
+    # PlanningScene > Scene Alpha로 조절한다. 메시지에 알파가 없어서
+    # 스크립트가 손댈 수 없다.)
+    MARKER_ALPHA = 0.65
+    MARKER_ALPHA_CURRENT = 1.0
+
     def publish_markers(self, dets, current_index=None, status_by_index=None):
         """검출 토마토를 구로 표시한다. 영상에서 "무엇을 향해 가는지"가 보여야
         의미가 있으므로, 현재 목표는 크게/불투명하게 그린다.
@@ -367,7 +375,8 @@ class PlanProbe(Node):
                 cr, cg, cb = (0.15, 0.75, 0.20)
             elif status == 'fail':
                 cr, cg, cb = (0.25, 0.25, 0.25)
-            alpha = 1.0 if i == current_index else 0.65
+            alpha = (self.MARKER_ALPHA_CURRENT if i == current_index
+                     else self.MARKER_ALPHA)
             m.color = ColorRGBA(r=cr, g=cg, b=cb, a=alpha)
             array.markers.append(m)
         self._marker_pub.publish(array)
@@ -1097,6 +1106,11 @@ def main():
     p.add_argument('--display-repeats', type=int, default=3, metavar='N',
                    help='목표마다 궤적을 몇 번 반복 재생할지. '
                         '정지 시간 = --display-seconds x 이 값')
+    # [2026-08-03] 녹화용 — 마커 구가 실제 토마토(포인트클라우드)를 가린다는
+    # 지적. 0이면 안 보인다.
+    p.add_argument('--marker-alpha', type=float, default=None,
+                   help='토마토 마커 투명도 0~1 (기본 0.65, 현재 목표는 1.0). '
+                        '0이면 사실상 숨긴다')
     p.add_argument('--label-scale', type=float, default=None, metavar='M',
                    help='화면 라벨 글자 높이(m). 기본 0.012. 월드 좌표라 크게 주면 '
                         '글자가 씬을 덮는다')
@@ -1310,6 +1324,11 @@ def main():
                             + ']도')
 
     pose_label, pose_label_full = _pose_label(args.start_pose)
+    if args.marker_alpha is not None:
+        node.MARKER_ALPHA = args.marker_alpha
+        # 현재 목표는 그보다 진하게 두되 상한을 넘지 않게.
+        node.MARKER_ALPHA_CURRENT = min(1.0, max(args.marker_alpha,
+                                                 args.marker_alpha * 1.5))
     if args.label_scale is not None:
         node.LABEL_SCALE = args.label_scale
     if args.label_pos is not None:

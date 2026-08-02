@@ -598,20 +598,29 @@ def cmd_obstacle(args):
     if args.as_object:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import scene_objects
-        if args.action == 'add':
-            if args.xyz_min != [0, 0, 0] or args.xyz_max != [0, 0, 0]:
-                lo, hi = tuple(args.xyz_min), tuple(args.xyz_max)
-            else:
-                lo, hi = obstacle_box()
-            print(f'collision object 장애물 추가: x {lo[0]:+.2f}~{hi[0]:+.2f}, '
-                  f'y {lo[1]:+.2f}~{hi[1]:+.2f}, z {lo[2]:.2f}~{hi[2]:.2f}')
-        else:
-            lo = hi = (0, 0, 0)
-            print('collision object 장애물 제거')
+        # [2026-08-03] 기둥과 벽을 각각/같이 넣을 수 있다. **id가 달라야**
+        # 하나만 뺄 수 있다 — 같은 id로 두 번 쏘면 나중 것이 앞 것을 덮는다.
+        wanted = {'pillar': [('pillar', obstacle_box(),
+                              scene_objects.OBSTACLE_OBJECT_ID)],
+                  'wall': [('wall', wall_box(), scene_objects.WALL_OBJECT_ID)]}
+        wanted['both'] = wanted['pillar'] + wanted['wall']
+        items = wanted[args.preset]
+        if args.action == 'add' and (args.xyz_min != [0, 0, 0]
+                                     or args.xyz_max != [0, 0, 0]):
+            items = [('직접지정', (tuple(args.xyz_min), tuple(args.xyz_max)),
+                      scene_objects.OBSTACLE_OBJECT_ID)]
+
         rclpy.init()
         node = Node('obstacle_object')
-        scene_objects.publish_obstacle(node, lo, hi,
-                                       remove=(args.action == 'remove'))
+        for name, (lo, hi), oid in items:
+            if args.action == 'add':
+                print(f'collision object 추가[{name}]: x {lo[0]:+.2f}~{hi[0]:+.2f}, '
+                      f'y {lo[1]:+.3f}~{hi[1]:+.3f}, z {lo[2]:.2f}~{hi[2]:.2f}')
+            else:
+                print(f'collision object 제거[{name}]')
+            scene_objects.publish_obstacle(node, lo, hi,
+                                           remove=(args.action == 'remove'),
+                                           object_id=oid)
         # 되읽어 확인한다 — 발행이 디스커버리 전에 나가면 조용히 사라진다.
         client = node.create_client(GetPlanningScene, '/get_planning_scene')
         client.wait_for_service(timeout_sec=10)
@@ -619,14 +628,18 @@ def cmd_obstacle(args):
         req.components.components = PlanningSceneComponents.WORLD_OBJECT_NAMES
         fut = client.call_async(req)
         rclpy.spin_until_future_complete(node, fut, timeout_sec=10)
-        ids = [o.id for o in fut.result().scene.world.collision_objects]
-        here = scene_objects.OBSTACLE_OBJECT_ID in ids
+        ids = set(o.id for o in fut.result().scene.world.collision_objects)
         want = (args.action == 'add')
-        print(f'씬 확인: 장애물 {"있음" if here else "없음"} '
-              + ('(의도대로)' if here == want else '**의도와 다름**'))
+        ok = True
+        for name, _box, oid in items:
+            here = oid in ids
+            ok = ok and (here == want)
+            print(f'씬 확인[{name}]: {"있음" if here else "없음"} '
+                  + ('(의도대로)' if here == want else '**의도와 다름**'))
+        here = ok
         node.destroy_node()
         rclpy.shutdown()
-        if here != want:
+        if not ok:
             sys.exit(1)
         return
 
@@ -741,6 +754,10 @@ def main():
     ob.add_argument('--xyz-min', nargs=3, type=float, default=[0, 0, 0],
                     help='프리셋 대신 직접 지정(add일 때만)')
     ob.add_argument('--xyz-max', nargs=3, type=float, default=[0, 0, 0])
+    ob.add_argument('--preset', choices=['pillar', 'wall', 'both'],
+                    default='pillar',
+                    help='pillar=베드-통 사이 기둥, wall=베이스 오른쪽 벽'
+                         '(y=-0.20, 높이 150mm), both=둘 다. --as-object에만 적용')
     ob.add_argument('--as-object', action='store_true',
                     help='octomap voxel 대신 **collision object**로 넣는다. '
                          '실물에서는 이쪽만 살아남는다(카메라 갱신과 '

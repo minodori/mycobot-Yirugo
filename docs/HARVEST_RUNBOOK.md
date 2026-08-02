@@ -9,7 +9,7 @@
 > 상태로 **에러 없이 100% 성공**했다(핸드오프 함정 18). 여기 있는 명령은 전부
 > 복사해서 그대로 쓸 수 있는 완전한 형태다.
 >
-> 2026-08-02 기준. **실물 검증은 아직 없다** — 5절을 반드시 읽을 것.
+> 2026-08-03 기준. **실물 검증은 아직 없다** — 5절을 반드시 읽을 것.
 
 ---
 
@@ -181,20 +181,46 @@ python3 -u scripts/sweep_targets_planned.py \
 > 재생 **중**에는 voxel이 계속 늘어 같은 조건이 아니다 — 수치로 인용하려면
 > 재생이 끝난 뒤에 돌리거나, `octomap_io.py capture`로 파일에 굳혀 쓸 것.
 
+**재생 배경과 octomap 주입은 양립하지 않는다.** bag이 `--loop`로 도는 동안에는
+카메라 클라우드가 octomap을 계속 갱신해 **주입한 voxel을 덮어쓴다.** 그렇다고
+재생을 멈추면 포인트클라우드와 YOLO 이미지가 같이 죽는다(실제로 겪었다 — 화면에
+배경이 사라졌다). 둘 다 원하면 **장애물을 collision object로 넣을 것**(4.1절).
+
+#### 구가 실제 열매를 가릴 때
+
+토마토 collision object는 검출 반지름 **+10mm**짜리 구라 배경의 진짜 열매를 덮는다.
+셋 다 조절할 수 있다:
+
+| 무엇 | 어디서 |
+|---|---|
+| collision object 구(초록, 플래너가 보는 것) | RViz `PlanningScene > Scene Geometry > Scene Alpha` (기본 0.35, GUI에서 실시간) |
+| `/tomato_markers` 구(상태 색) | 스윕 `--marker-alpha 0.25` (0이면 사실상 숨김) |
+| 아예 끄기 | RViz 트리에서 `토마토 (검출 결과)` 또는 `Show Scene Geometry` 체크 해제 |
+
 ---
 
 ## 4. 장애물 데모 — 있을 때와 없을 때
 
 베드와 수확통 **사이**에 기둥을 세워 경로가 돌아가는 것을 보여준다.
+`--preset`으로 무엇을 세울지 고른다:
+
+| 프리셋 | 무엇 | 위치 |
+|---|---|---|
+| `pillar` (기본) | 베드–통 사이 기둥 | x 0.06~0.14, y 0.08~0.16, z 0~0.30 |
+| `wall` | 베이스 오른쪽 벽(실측) | y = −0.20, x −0.50~0, 높이 150mm |
+| `both` | 둘 다 | |
+
+(`--preset`은 `--as-object`에만 적용된다. voxel 쪽은 `add-box --wall` /
+`add-box --obstacle`로 파일을 만든다.)
 
 ```bash
 # FakeSystem: octomap voxel로 (화면에 voxel로 보인다)
 python3 scripts/octomap_io.py obstacle add
 python3 scripts/octomap_io.py obstacle remove
 
-# 실물: collision object로 (아래 이유 때문에 실물은 이쪽만 된다)
-python3 scripts/octomap_io.py obstacle add    --as-object
-python3 scripts/octomap_io.py obstacle remove --as-object
+# 실물·재생 중: collision object로 (아래 이유 때문에 그때는 이쪽만 된다)
+python3 scripts/octomap_io.py obstacle add    --as-object --preset both
+python3 scripts/octomap_io.py obstacle remove --as-object --preset both
 ```
 
 수치로도 비교한다 — 같은 세션에서 유무만 바꿔 두 번:
@@ -217,6 +243,33 @@ python3 -u scripts/sweep_targets_planned.py --repeat 10 --orientation-tolerance 
 
 **도달 목표 수가 그대로**인 것이 중요하다 — 막는 것이 아니라 돌아가게 하는
 위치를 골랐다(정렬 자세도 통 자세도 안 건드린다).
+
+### 4.1 화면으로 대비를 보여줄 때 (녹화용)
+
+위 스윕은 목표 15개를 **순회**하므로 화면에는 매번 다른 목표가 지나간다 —
+"장애물 때문에 경로가 이렇게 달라졌다"가 안 보인다. 비교하려면 **목표를 고정하고
+조건만 바꿔야** 한다:
+
+```bash
+python3 -u scripts/demo_obstacle_ab.py \
+    --target 4 --cycle bsc --preset both \
+    --repeat 5 --display-seconds 6 --display-repeats 2 --pause 1.5
+```
+
+한 목표에 대해 `장애물 ON`(주황 라벨) → `OFF`(파랑 라벨)를 무한 반복한다.
+실측(목표 #4, 기둥+벽):
+
+| 조건 | 정렬 이동량 | 복귀 이동량 |
+|---|---|---|
+| ON | 480° | 418° |
+| OFF | 319° | 317° |
+
+**정렬 +50%, 복귀 +32%.** 회차를 거듭해도 값이 재현된다(479/420).
+
+- `--target 1~15`로 목표를 바꾼다(차이가 큰 목표를 골라 쓸 것)
+- `--preset pillar|wall|both`
+- 장애물은 **collision object**로 넣는다 — 재생 중이든 실물이든 안 지워진다
+- 끝나면 스크립트가 장애물과 열매 구를 스스로 치운다
 
 > **이 데모에 `--octomap-acm`을 켜지 말 것.** 그리퍼·손목 10개 링크가 octomap
 > voxel을 통과해도 되게 만드는 옵션이라(핸드오프 6.3절) 장애물을 손목까지
