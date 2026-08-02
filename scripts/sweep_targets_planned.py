@@ -1203,6 +1203,22 @@ def main():
                 parts.append('octomap ACM 완화 없음')
         scene_label = ' + '.join(parts)
     print(f'\n씬: {scene_label}')
+    # [2026-08-02] 빈 씬은 **조용히 낙관적인 답을 준다** — 이 문서에서 세 번
+    # 데인 함정 3이다(뚫고 가는 경로가 성공으로 집계된다). 한 줄 출력으로는
+    # 놓치기 쉬워서(실제로 놓쳤다) 눈에 띄게 경고한다. 화면 얘기까지 같이
+    # 하는 이유: 빈 씬이면 RViz에 장애물이 아무것도 안 그려져 "배경이 안
+    # 나온다"로 보인다.
+    if not (args.tomatoes or args.octomap):
+        print('  ** 경고: 장애물이 하나도 없다 — 뚫고 가는 경로가 성공으로 '
+              '잡힌다(함정 3).')
+        print('     실물에 가깝게 재려면: --tomatoes --octomap '
+              'bags/bed_look_octomap_wall.bin [--octomap-acm]')
+        print('     RViz에 배경(열매 구·octomap voxel)이 안 보이는 것도 이 때문이다.')
+    if args.display_pause <= 0:
+        print('  ** 참고: --display-pause가 없어 RViz에 재생·마커·라벨을 '
+              '발행하지 않는다(수치만 낸다).')
+        print('     화면으로 보려면: --display-pause 1.0 --display-seconds 6 '
+              '--display-repeats 2 --display-loop 0')
 
     def teardown():
         """씬을 원래대로 되돌린다.
