@@ -158,6 +158,15 @@ def main():
     # 미치는 영향이 자명하지 않아 별도로 잰다.
     p.add_argument('--with-bin', action='store_true',
                    help='목표마다 파지 직후 수확통에 놓는 구간을 사슬에 넣는다')
+    # [2026-08-02] 노드가 실제로 쓸 **고정 통 자세**로 재기 위한 옵션.
+    # --with-bin의 통 구간은 pose goal(상자+yaw 자유)이라 플래너가 매번 다른
+    # IK 해를 고른다 — 그건 "통에 놓을 수 있는가"의 하한이지 노드가 하는 일이
+    # 아니다. 노드는 move_to_configuration으로 **하나의 관절벡터**에 간다.
+    # 이 파일(scripts/find_bin_pose.py 결과)을 주면 그 자세로 재고, 사슬 D
+    # (통 자세 = 대기 자세)가 비교 대상에 추가된다.
+    p.add_argument('--bin-pose', default=None,
+                   help='고정 통 자세 JSON(bags/bin_pose.json). 주면 통 구간을 '
+                        '이 관절벡터로 재고 사슬 D를 추가한다')
     p.add_argument('--csv', default=None)
     args = p.parse_args()
 
@@ -181,7 +190,18 @@ def main():
     scene_objects.allow_gripper_octomap_collisions(node, args.octomap_acm,
                                                    quiet=True)
     print(f'씬: 열매 {len(dets)}개 + octomap {len(octomap_io.decode_msg(owp.octomap))} voxel'
-          f' + octomap ACM {"완화" if args.octomap_acm else "완화 없음"}\n')
+          f' + octomap ACM {"완화" if args.octomap_acm else "완화 없음"}')
+
+    BINQ = None
+    if args.bin_pose:
+        with open(args.bin_pose, encoding='utf-8') as fh:
+            BINQ = list(json.load(fh)['joints_rad'])
+        ok, hits = state_valid(node, BINQ)
+        print(f'고정 통 자세: J1 {math.degrees(BINQ[0]):+.1f}도, '
+              f'이 씬에서 {"유효" if ok else f"충돌 {hits}"}')
+        if not ok:
+            raise SystemExit('통 자세가 이 씬에서 충돌한다 — 재도출할 것')
+    print()
 
     # ---- 1) 벽이 armed 족을 어디서 자르는가 ----
     print('[1] armed pose 족의 유효성 (자세 자체의 충돌 검사)')
@@ -248,6 +268,12 @@ def main():
         통을 안 쓰면 그 자리 그대로."""
         if not args.with_bin:
             return frm, 0.0
+        if BINQ is not None:
+            # 고정 통 자세 — 노드와 같은 관절 목표로 간다.
+            c = transit(node, frm, BINQ, args.repeat)
+            if c is None:
+                return None, None
+            return list(BINQ), c
         c, j = to_bin(node, frm, args.repeat)
         if c is None:
             return None, None
@@ -329,11 +355,37 @@ def main():
             return None, legs
         return cost + back, legs
 
+    def chain_D():
+        """통 자세 = 대기 자세. look -> 통 -> [t_i] -> 통 -> ... -> look.
+
+        A와 달리 armed pose를 경유하지 않는다. 목표 사이 비용이 **목표마다
+        독립**이라(모두 같은 자세를 경유) C와 달리 **수확 순서에 무관**하다 —
+        1.5절이 C의 채택 조건으로 걸었던 "실제 순서로 재확인"이 D에는 붙지
+        않는 이유다."""
+        cost = transit(node, LOOK, BINQ, args.repeat)
+        if cost is None:
+            return None, []
+        legs = [('look->통', cost)]
+        for g in goals:
+            a = transit(node, BINQ, g['joints'], args.repeat)      # 통 -> 정렬
+            b = transit(node, g['joints'], BINQ, args.repeat)      # 파지 후 -> 통
+            if a is None or b is None:
+                return None, legs
+            cost += a + b
+            legs.append((f'통->#{g["idx"]}->통', a + b))
+        back = transit(node, BINQ, LOOK, args.repeat)
+        if back is None:
+            return None, legs
+        return cost + back, legs
+
     print('\n[3] 사슬 비용 (전이만, 접근·파지·후퇴 제외)')
     results = {}
-    for label, fn in (('A  현재(단일 armed)', chain_A),
-                      ('B1 타겟별(규칙)', lambda: chain_B('b1')),
-                      ('C  armed 없음', chain_C)):
+    chains = [('A  현재(단일 armed)', chain_A),
+              ('B1 타겟별(규칙)', lambda: chain_B('b1')),
+              ('C  armed 없음', chain_C)]
+    if BINQ is not None:
+        chains.append(('D  통 자세=대기 자세', chain_D))
+    for label, fn in chains:
         total, legs = fn()
         results[label] = total
         print(f'  {label:<22} '

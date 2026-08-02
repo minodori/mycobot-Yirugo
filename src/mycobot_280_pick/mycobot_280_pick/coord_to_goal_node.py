@@ -101,6 +101,9 @@ COMPLETION_POLL_PERIOD = 0.2
 # 토마토조차 화면 가장자리에 bbox가 걸려 depth가 무효해지는 문제를 확인함 —
 # harvest_sequence_node처럼 다음 목표를 순차로 보내는 상위 로직이 항상 look
 # pose 프레이밍에서 다음 검출을 받도록 보장하기 위함.
+# [2026-08-02] 이름이 낡았다 — 복귀 목표는 look pose가 아니라 **대기 자세**다
+# (2026-08-01 armed pose, 이후 통 자세). 값의 역할은 그대로 "후퇴가 끝난 뒤
+# 복귀를 시작하기 전의 정지 시간"이라 이름만 남겨 뒀다.
 RETURN_TO_LOOK_POSE_DELAY_SEC = 1.5
 
 # SRDF(firefighter.srdf)의 look_pose group_state와 동일 (docs/look_pose.md).
@@ -129,6 +132,11 @@ LOOK_POSE_JOINT_POSITIONS = [
 ]
 
 # [2026-08-01] armed pose — 수확 사이클의 시작·종료 자세(docs/new_concept.md).
+#
+# **[2026-08-02] 이제 기본값이 아니다.** 대기 자세는 아래 BIN_POSE_JOINT_POSITIONS
+# (통 자세)로 바뀌었고, 이 자세는 `-p waiting_pose:=armed`로만 쓴다. 아래 설명은
+# "왜 look pose와 대기 자세를 분리했나"의 근거로 그대로 유효하다 — 통 자세도 그
+# 분리 위에 서 있다. 바뀐 것은 **분리한 자리를 어디에 두느냐**뿐이다.
 #
 # 왜 look pose와 분리하나
 # ----------------------
@@ -200,16 +208,77 @@ ARMED_POSE_JOINT_POSITIONS = [
     0.024435,    #   +1.40도 ┘
 ]
 
-# 팔이 이미 armed pose에 있다고 볼 허용 오차(rad). 이 안이면 경유를 건너뛴다.
+# [2026-08-02] 통 자세 — 수확통에 놓는 자세이자 **대기 자세**다.
+#
+# armed pose를 왜 대체하나
+# ------------------------
+# docs/ARMED_POSE_HANDOFF.md 1.5절이 사이클 전체(사슬)를 재면서 드러난 것:
+# armed pose는 팔을 **뒤로 접은** 자세이고 정렬 위치는 **베드 앞**이라, 목표에서
+# 목표로 갈 때마다 접었다 펴는 **우회**가 된다. armed pose가 이득인 것은 look
+# pose에서 첫 목표로 갈 때뿐이었다. 전이 비용(목표 15개 사슬):
+#
+#   A 현재(armed 대기 + 통 별도)      16077도
+#   C armed 없음 + 통                 11241도  (-30.1%)
+#   D 통 자세 = 대기 자세             11165도  (-30.6%)
+#
+# D가 C와 같은 값인 것은 **경로가 같기 때문**이다 — C에서도 팔은 파지 직후
+# 통에 들렀다 다음 목표로 간다. 즉 통이 이미 대기 자세 역할을 하고 있었고,
+# A는 거기에 armed pose를 하나 더 끼워 넣은 것이었다. 그래서 **"armed pose
+# 제거"와 "수확통 편입"은 별개의 일이 아니라 같은 일**이다.
+#
+# 안전은 armed pose와 거의 같다. 대기 중 그리퍼 끝단에서 가장 가까운 열매까지:
+#   armed pose 33.3cm / **통 자세 27.7cm** / 정렬 위치(통 없이 그 자리 대기) 3cm
+# 통은 베드 반대편(g_base +Y)이라 팔이 베드 밖에서 기다린다.
+#
+# 어떻게 정했나 — scripts/find_bin_pose.py
+# ---------------------------------------
+# 1.5절의 통 자세는 pose goal(6x6cm 상자 + yaw 자유)의 IK 해라 매번 다르다.
+# 그런데 노드는 대기 자세로 move_to_configuration(관절 목표)을 쓰고
+# _is_near_waiting_pose로 경유를 건너뛰므로 **고정된 관절벡터 하나**가 필요하다.
+# 그래서 플래너가 실제로 내놓는 IK 해들을 후보로 모아
+#   (1) FK로 그리퍼 끝단이 통 입구 안인가 + 아래를 보는가 (1.1절 사고의 교훈),
+#   (2) full 씬(열매+octomap+벽)에서 자세 자체가 충돌하지 않는가,
+#   (3) 정렬 15개에서 이 자세까지의 전이 합이 최소인가
+# 로 걸러 골랐다. (1)(2)는 통과 조건이고 (3)이 목적함수다 — 기울어진 채 열면
+# 열매가 통 밖으로 튀는 것은 정도의 문제가 아니라 되고 안 되고의 문제라서다.
+#
+# 실측 (열매 15개 + octomap 988 + 벽 428 voxel, octomap ACM 완화, 반복 30회)
+#   그리퍼 끝단     (-0.006, +0.135, +0.129) — 통 입구 (0, 0.15, 0.130) 안
+#   아래보기 편차   6.5도 (연직 아래 기준)
+#   열매까지 여유   28.4cm  (armed pose 33.3cm / 정렬 위치 3cm)
+#   자세 유효성     full 씬에서 충돌 없음
+#   정렬 15개 편도합 4805도
+#
+# 주의 1: 이 값은 **통 위치에 묶여 있다** — 4절 확정값 g_base (0, +0.15),
+#   림 z=0.100, 놓는 지점(그리퍼 끝단) z=0.130 기준이다. 통을 옮기면 재도출할 것.
+# 주의 2: 통이 왼쪽(+Y)이라 싸다. 오른쪽(-Y)이면 같은 기계인데도 +17% 비싸다
+#   (손목의 73.2mm 측면 오프셋 때문 — 1.5절 곁가지). 거울상으로 뒤집으면 안 된다.
+# 주의 3: FakeSystem 측정이다. 실물 검증은 아직 없다(7절 남은 일 2번).
+BIN_POSE_JOINT_POSITIONS = [
+    2.137775,    # +122.49도  <- 통이 g_base +Y(왼쪽)이라 J1이 크게 양수다
+    0.277622,    #  +15.91도
+    -1.484424,   #  -85.05도
+    -0.476491,   #  -27.30도
+    -0.016701,   #   -0.96도
+    -0.073897,   #   -4.23도
+]
+
+# 팔이 이미 대기 자세에 있다고 볼 허용 오차(rad). 이 안이면 경유를 건너뛴다.
 # LOOK_POSE_TOLERANCE_RAD(0.08)와 같은 기준 — 실물 정지 오차와 컨트롤러
 # tolerance를 감안한 값이다.
-ARMED_POSE_TOLERANCE_RAD = 0.08
+WAITING_POSE_TOLERANCE_RAD = 0.08
 
-# armed pose를 경유할 때 그 자리에서 잠깐 멈추는 시간(초).
+# 대기 자세를 경유할 때 그 자리에서 잠깐 멈추는 시간(초).
 # 기능상 필요한 대기는 아니고, **사람이 경유를 눈으로 확인할 수 있게** 하는
 # 것이 목적이다(사용자 요청, 2026-08-01). 리포트 영상에서도 "look pose ->
-# armed pose -> target" 구조가 드러나야 한다.
-ARMED_POSE_DWELL_SEC = 0.5
+# 대기 자세 -> target" 구조가 드러나야 한다.
+WAITING_POSE_DWELL_SEC = 0.5
+
+# [2026-08-02] 통 위에서 그리퍼를 열어 열매를 놓은 뒤 그 자리에 머무는 시간(초).
+# 열매가 손가락에서 떨어져 통 안으로 들어가는 것을 눈으로 확인하기 위한 값이고,
+# 실물에서 열매가 튀거나 다음 사이클 시작 시 손가락에 걸리는 문제가 보이면
+# 여기를 늘릴 것(1.5절 결론 3의 "채택 전 확인할 것" 중 하나).
+BIN_RELEASE_DWELL_SEC = 0.5
 
 # ---- 로봇 설정 (tomato_scene_test.py에서 확인된 값과 동일) ----
 JOINT_NAMES = [
@@ -1029,14 +1098,58 @@ class CoordToGoalNode(Node):
             .get_parameter_value()
             .bool_value
         )
-        # [2026-08-01] 사이클 복귀 자세를 armed pose로 할지(기본) look pose로
-        # 되돌릴지. 실물에서 문제가 나면 재빌드 없이 바로 되돌릴 수 있어야 한다:
-        #   ros2 run ... coord_to_goal_node --ros-args -p use_armed_pose:=false
+        # [2026-08-02] 대기 자세를 무엇으로 할 것인가.
+        #
+        #   bin   (기본) 수확통 위 = 놓는 자세 겸 대기 자세. 전이 -30.6%
+        #                (BIN_POSE_JOINT_POSITIONS 주석 참고). 여기서만 파지한
+        #                열매를 실제로 통에 놓는다.
+        #   armed 2026-08-01의 armed pose. 통에 놓지 않는다(열매를 쥔 채 대기).
+        #   look  armed pose 도입 이전의 원래 동작.
+        #
+        # 실물에서 문제가 나면 재빌드 없이 되돌릴 수 있어야 한다:
+        #   ros2 run ... coord_to_goal_node --ros-args -p waiting_pose:=armed
+        self.declare_parameter('waiting_pose', 'bin')
+        # [구] use_armed_pose — 2026-08-01의 되돌리기 스위치. waiting_pose가
+        # 생기면서 역할이 흡수됐지만, 이 인자를 그대로 쓰는 런치/문서가 있어
+        # **끄는 쪽으로만** 계속 받는다(false = 옛 look pose 동작).
         self.declare_parameter('use_armed_pose', True)
-        self._use_armed_pose = (
-            self.get_parameter('use_armed_pose').get_parameter_value().bool_value
+        mode = (
+            self.get_parameter('waiting_pose').get_parameter_value().string_value
+            or 'bin'
+        ).strip().lower()
+        if mode not in ('bin', 'armed', 'look'):
+            self.get_logger().warn(
+                f"waiting_pose:={mode}는 모르는 값 — 'bin'으로 진행함 "
+                "(bin | armed | look 중 하나)"
+            )
+            mode = 'bin'
+        if mode == 'bin' and not self.get_parameter(
+            'use_armed_pose'
+        ).get_parameter_value().bool_value:
+            # 옛 스위치로 "되돌려라"라고 지시받은 경우 — 그 시절의 의미대로
+            # look pose 복귀로 간다.
+            mode = 'look'
+        self._waiting_pose_mode = mode
+        self._waiting_pose_joints = {
+            'bin': BIN_POSE_JOINT_POSITIONS,
+            'armed': ARMED_POSE_JOINT_POSITIONS,
+            'look': LOOK_POSE_JOINT_POSITIONS,
+        }[mode]
+        self._waiting_pose_label = {
+            'bin': '통 자세', 'armed': 'armed pose', 'look': 'look pose',
+        }[mode]
+        # 통 자세일 때만, 파지한 열매를 대기 자세에서 놓는다(그리퍼 열기).
+        self._release_at_waiting_pose = (mode == 'bin')
+        self._return_pose_label = self._waiting_pose_label
+        # 파지에 성공해 지금 열매를 쥐고 있는가 — 통에서 놓을지 판단하는 데
+        # 쓴다. 파지 전에 중단된 사이클(_abort_to_return)은 빈 그리퍼라
+        # 놓기 단계를 건너뛰어야 한다.
+        self._holding_object = False
+        self.get_logger().info(
+            f'대기 자세: {self._waiting_pose_label} (waiting_pose:={mode})'
+            + ('. 파지한 열매는 이 자리에서 통에 놓는다.'
+               if self._release_at_waiting_pose else '')
         )
-        self._return_pose_label = 'armed pose' if self._use_armed_pose else 'look pose'
         # 테스트 모드에서 target_point는 등록됐지만 아직 /confirm_grasp을
         # 못 받은 상태인지 표시. /emergency_stop이 이 상태의 대기 중인 목표도
         # 그대로 취소함(기존 로직 그대로 재사용, 아래 참고).
@@ -1085,9 +1198,11 @@ class CoordToGoalNode(Node):
         self._busy = False
         self._completion_timer = None
         self._clear_timer = None
-        # [2026-08-01] armed pose 경유 단계용 타이머(_start_planning 참고).
-        self._armed_transit_timer = None
-        self._armed_dwell_timer = None
+        # [2026-08-01] 대기 자세 경유 단계용 타이머(_start_planning 참고).
+        self._waiting_transit_timer = None
+        self._waiting_dwell_timer = None
+        # [2026-08-02] 통에 놓은 뒤 그 자리에 머무는 타이머(_check_return_complete).
+        self._bin_release_dwell_timer = None
         self._pending_approach_position = None
         self._pending_target_position = None
         # [2026-07-30] 원본 목표(토마토) 위치 — 접근축 후보를 만드는 기준.
@@ -1205,7 +1320,7 @@ class CoordToGoalNode(Node):
         # [Tier4, so101 rviz_control_panel_node 이식용] look pose로 즉시 이동/
         # 소프트 정지를 외부(RViz 인터랙티브 마커 등)에서 트리거할 수 있는
         # 독립 서비스. 기존엔 목표 접근 완료 후 내부적으로만 look pose 복귀
-        # 로직(_start_return_to_look_pose)이 있었고, 그와 무관하게 언제든
+        # 로직(_start_return_to_waiting_pose)이 있었고, 그와 무관하게 언제든
         # 호출 가능한 서비스가 없었음.
         self._go_to_look_pose_service = self.create_service(
             Trigger, 'go_to_look_pose', self._on_go_to_look_pose_request
@@ -1283,10 +1398,12 @@ class CoordToGoalNode(Node):
             '_look_pose_completion_timer',
             '_gripper_completion_timer',
             '_post_grasp_dwell_timer',
-            # [2026-08-01] armed pose 경유 단계. 비상 정지가 이 둘을 안 끄면
+            # [2026-08-01] 대기 자세 경유 단계. 비상 정지가 이 둘을 안 끄면
             # 정지 직후에도 경유가 이어져 팔이 다시 움직인다.
-            '_armed_transit_timer',
-            '_armed_dwell_timer',
+            '_waiting_transit_timer',
+            '_waiting_dwell_timer',
+            # [2026-08-02] 통에 놓은 뒤의 대기.
+            '_bin_release_dwell_timer',
         ):
             timer = getattr(self, timer_attr)
             if timer is not None:
@@ -1678,68 +1795,79 @@ class CoordToGoalNode(Node):
             )
         return candidates
 
-    def _is_near_armed_pose(self) -> bool:
-        """팔이 이미 armed pose에 있는가(경유를 건너뛰어도 되는가)."""
+    def _is_near_waiting_pose(self) -> bool:
+        """팔이 이미 대기 자세에 있는가(경유를 건너뛰어도 되는가)."""
         current = self._get_current_arm_joint_positions()
         if current is None:
             return False
         return all(
-            abs(current[name] - target) <= ARMED_POSE_TOLERANCE_RAD
-            for name, target in zip(JOINT_NAMES, ARMED_POSE_JOINT_POSITIONS)
+            abs(current[name] - target) <= WAITING_POSE_TOLERANCE_RAD
+            for name, target in zip(JOINT_NAMES, self._waiting_pose_joints)
         )
 
     def _start_planning(self) -> None:
-        """[2026-08-01] 정렬(1/5) 전에 armed pose를 **경유**한다.
+        """[2026-08-01] 정렬(1/5) 전에 대기 자세를 **경유**한다.
 
         Phase 2에서 복귀만 armed pose로 바꿨더니 나가는 길이 비대칭이 됐다 —
-        시퀀스 첫 목표는 여전히 look pose에서 목표로 직행했다. 그런데 armed pose
-        도입의 근거가 된 측정은 전부 "armed pose에서 출발"을 전제한 값이다.
+        시퀀스 첫 목표는 여전히 look pose에서 목표로 직행했다. 그런데 대기 자세
+        도입의 근거가 된 측정은 전부 "대기 자세에서 출발"을 전제한 값이다.
         경유를 넣어야 그 전제가 실제로 성립한다.
 
-        이미 armed pose에 있으면(= 두 번째 목표부터) 건너뛴다. 즉 실제로 이
+        이미 대기 자세에 있으면(= 두 번째 목표부터) 건너뛴다. 즉 실제로 이
         경유가 일어나는 것은 시퀀스당 1회, look pose에서 시작할 때뿐이다.
+
+        [2026-08-02] 대기 자세가 통 자세가 되면서 이 경유의 의미가 하나 늘었다 —
+        시퀀스 첫 목표는 `look -> 통 -> 정렬₁`로 시작한다. 빈 그리퍼로 통 위를
+        지나는 것이라 놓기 동작은 없다(놓기는 복귀 쪽에서만 일어난다).
         """
         self._clear_timer.cancel()
         self._clear_timer = None
 
-        if self._use_armed_pose and not self._is_near_armed_pose():
-            self.get_logger().info('[0/5 armed pose] 경유 이동 중...')
-            self._moveit2.move_to_configuration(
-                ARMED_POSE_JOINT_POSITIONS, joint_names=JOINT_NAMES
+        # waiting_pose:=look은 armed pose 도입 **이전 동작으로 되돌리는** 스위치라
+        # 경유 단계 자체가 없어야 한다(그때는 팔이 어디에 있든 그 자리에서 정렬을
+        # 플래닝했다). 되돌리기 경로에 새 동작이 섞이면 되돌린 것이 아니다.
+        if self._waiting_pose_mode != 'look' and not self._is_near_waiting_pose():
+            self.get_logger().info(
+                f'[0/5 {self._waiting_pose_label}] 경유 이동 중...'
             )
-            self._armed_transit_timer = self.create_timer(
-                COMPLETION_POLL_PERIOD, self._check_armed_transit_complete
+            self._moveit2.move_to_configuration(
+                self._waiting_pose_joints, joint_names=JOINT_NAMES
+            )
+            self._waiting_transit_timer = self.create_timer(
+                COMPLETION_POLL_PERIOD, self._check_waiting_transit_complete
             )
             return
 
-        self._continue_planning_from_armed()
+        self._continue_planning_from_waiting_pose()
 
-    def _check_armed_transit_complete(self) -> None:
+    def _check_waiting_transit_complete(self) -> None:
         if self._moveit2.query_state() != MoveIt2State.IDLE:
             return
-        self._armed_transit_timer.cancel()
-        self._armed_transit_timer = None
+        self._waiting_transit_timer.cancel()
+        self._waiting_transit_timer = None
 
         if self._moveit2.motion_suceeded:
             self.get_logger().info(
-                f'[0/5 armed pose] 도착. {ARMED_POSE_DWELL_SEC}초 정지 후 정렬 시작.'
+                f'[0/5 {self._waiting_pose_label}] 도착. '
+                f'{WAITING_POSE_DWELL_SEC}초 정지 후 정렬 시작.'
             )
         else:
             # 경유 실패는 치명적이지 않다 — 어디에 있든 정렬 플래닝은 시도할 수
             # 있다. 다만 이동량이 커질 뿐이므로 경고만 남기고 진행한다.
             self.get_logger().warn(
-                '[0/5 armed pose] 경유 실패 — 현재 자세에서 그대로 정렬 시도.'
+                f'[0/5 {self._waiting_pose_label}] 경유 실패 — 현재 자세에서 '
+                '그대로 정렬 시도.'
             )
-        self._armed_dwell_timer = self.create_timer(
-            ARMED_POSE_DWELL_SEC, self._on_armed_dwell_done
+        self._waiting_dwell_timer = self.create_timer(
+            WAITING_POSE_DWELL_SEC, self._on_waiting_dwell_done
         )
 
-    def _on_armed_dwell_done(self) -> None:
-        self._armed_dwell_timer.cancel()
-        self._armed_dwell_timer = None
-        self._continue_planning_from_armed()
+    def _on_waiting_dwell_done(self) -> None:
+        self._waiting_dwell_timer.cancel()
+        self._waiting_dwell_timer = None
+        self._continue_planning_from_waiting_pose()
 
-    def _continue_planning_from_armed(self) -> None:
+    def _continue_planning_from_waiting_pose(self) -> None:
         if self._clear_octomap_client.service_is_ready():
             self._clear_octomap_client.call_async(Empty.Request())
 
@@ -2187,7 +2315,7 @@ class CoordToGoalNode(Node):
         self.get_logger().warn(f'{reason} — 이후 단계 건너뛰고 look pose 복귀 시도.')
         self._pending_result_succeeded = False
         self._return_dwell_timer = self.create_timer(
-            RETURN_TO_LOOK_POSE_DELAY_SEC, self._start_return_to_look_pose
+            RETURN_TO_LOOK_POSE_DELAY_SEC, self._start_return_to_waiting_pose
         )
 
     def _finalize_planning(self, approach_quat, candidate) -> None:
@@ -2399,6 +2527,10 @@ class CoordToGoalNode(Node):
             self._abort_to_return('[4/5 파지] 실패')
             return
 
+        # [2026-08-02] 여기서부터 그리퍼가 열매를 쥐고 있다 — 통 자세에 도착하면
+        # 놓아야 한다는 판단의 근거(_check_return_complete). 파지 전에 중단된
+        # 사이클은 빈 그리퍼라 이 플래그가 서지 않는다.
+        self._holding_object = True
         self.get_logger().info(
             f'[4/5 파지] 완료. {POST_GRASP_DWELL_SEC}초 대기 후 후퇴 시작(육안 확인용).'
         )
@@ -2471,29 +2603,32 @@ class CoordToGoalNode(Node):
         # 전부 성공했다는 뜻이므로, 여기선 후퇴 결과만 반영하면 됨).
         self._pending_result_succeeded = succeeded
         self._return_dwell_timer = self.create_timer(
-            RETURN_TO_LOOK_POSE_DELAY_SEC, self._start_return_to_look_pose
+            RETURN_TO_LOOK_POSE_DELAY_SEC, self._start_return_to_waiting_pose
         )
 
-    def _start_return_to_look_pose(self) -> None:
-        """[2026-08-01] 복귀 목표가 look pose -> armed pose로 바뀌었다.
+    def _start_return_to_waiting_pose(self) -> None:
+        """[2026-08-01] 복귀 목표가 look pose -> 대기 자세로 바뀌었다.
+        [2026-08-02] 그 대기 자세가 armed pose -> **통 자세**가 됐다.
 
         정상 종료(_check_retreat_complete)와 실패 중단(_abort_to_return) 두 경로가
         모두 이 함수로 수렴하므로 여기 한 곳만 고치면 사이클 전체가 바뀐다.
 
-        look pose로 돌아갈 필요가 없는 이유는 ARMED_POSE_JOINT_POSITIONS 주석
+        look pose로 돌아갈 필요가 없는 이유는 BIN_POSE_JOINT_POSITIONS 주석
         참고 — 복귀의 목적이 카메라 프레이밍인데, 이 팔은 look-then-move라
         관측이 시퀀스당 1회면 충분하다. 다음 스냅샷 전에는 상위 노드가
         /go_to_look_pose를 호출해야 한다.
+
+        통 자세일 때는 이 복귀가 곧 **놓기 구간**이다 — 도착 후
+        _check_return_complete가 그리퍼를 연다.
         """
         self._return_dwell_timer.cancel()
         self._return_dwell_timer = None
 
-        target = (ARMED_POSE_JOINT_POSITIONS if self._use_armed_pose
-                  else LOOK_POSE_JOINT_POSITIONS)
-        label = 'armed pose' if self._use_armed_pose else 'look pose'
-        self.get_logger().info(f'{label}로 복귀 중...')
-        self._return_pose_label = label
-        self._moveit2.move_to_configuration(target, joint_names=JOINT_NAMES)
+        self._return_pose_label = self._waiting_pose_label
+        self.get_logger().info(f'{self._waiting_pose_label}로 복귀 중...')
+        self._moveit2.move_to_configuration(
+            self._waiting_pose_joints, joint_names=JOINT_NAMES
+        )
         self._return_completion_timer = self.create_timer(
             COMPLETION_POLL_PERIOD, self._check_return_complete
         )
@@ -2552,13 +2687,14 @@ class CoordToGoalNode(Node):
         self._publish_grasp_step(GRASP_STEP_IDLE)
 
         label = getattr(self, '_return_pose_label', 'look pose')
-        if self._moveit2.motion_suceeded:
+        arrived = self._moveit2.motion_suceeded
+        if arrived:
             self.get_logger().info(f'{label} 복귀 완료.')
             # [2026-08-01] APPROACH_REFERENCE_POINT 검증은 **look pose에 있을 때만**
-            # 의미가 있다(그 상수가 look pose flange 위치이므로). armed pose로
+            # 의미가 있다(그 상수가 look pose flange 위치이므로). 다른 대기 자세로
             # 복귀하면 당연히 안 맞아 오탐 경고가 뜬다 — 검증은
             # _check_go_to_look_pose_complete로 옮겼다.
-            if not self._use_armed_pose:
+            if self._waiting_pose_mode == 'look':
                 self._verify_approach_reference_point()
         else:
             self.get_logger().warn(f'{label} 복귀 실패 — 팔 상태 수동 확인 필요.')
@@ -2569,11 +2705,71 @@ class CoordToGoalNode(Node):
         self._moveit2.max_velocity = VELOCITY_SCALING
         self._moveit2.max_acceleration = ACCELERATION_SCALING
 
-        # harvest_sequence_node 등 여러 목표를 순차 발행하는 상위 로직이 이
-        # 결과를 보고 다음 목표를 보낼 타이밍을 잡을 수 있도록 함(2026-07-24,
-        # "수확 순차 처리" 로드맵). look pose 복귀까지 끝난 뒤에 발행해야
-        # 다음 목표 검출 시점에 카메라가 이미 look pose 프레이밍으로 돌아와
-        # 있음이 보장됨.
+        # [2026-08-02] 통 자세에 열매를 쥔 채 도착했으면 여기가 놓는 자리다.
+        # **복귀에 실패했으면 절대 열지 않는다** — 팔이 통 위에 있다는 보장이
+        # 없으므로, 여는 순간 열매가 베드나 바닥 아무 데나 떨어진다.
+        if self._release_at_waiting_pose and self._holding_object and arrived:
+            self._start_bin_release()
+            return
+
+        self._finish_cycle()
+
+    def _start_bin_release(self) -> None:
+        """[2026-08-02] 통 위에서 그리퍼를 열어 열매를 놓는다.
+
+        파지 때 쥔 폭 그대로가 아니라 **접근 때와 같은 폭**(대상 반지름 기준)으로
+        연다 — [2/5]와 같은 계산이라 손가락이 열매를 확실히 놓을 만큼은 열리고,
+        최대 개방까지 벌리지 않아 다음 사이클 시작이 빠르다.
+        """
+        open_position = _gripper_open_position_for_radius(
+            self._pending_target_radius_m
+        )
+        self.get_logger().info(
+            f'[통] 놓기 — 그리퍼 여는 중(목표 {open_position:.3f}rad).'
+        )
+        self._gripper_moveit2.move_to_position(open_position)
+        self._gripper_completion_timer = self.create_timer(
+            COMPLETION_POLL_PERIOD, self._check_bin_release_complete
+        )
+
+    def _check_bin_release_complete(self) -> None:
+        if self._gripper_moveit2.query_state() != MoveIt2State.IDLE:
+            return
+        self._gripper_completion_timer.cancel()
+        self._gripper_completion_timer = None
+
+        if self._gripper_moveit2.motion_suceeded:
+            self._holding_object = False
+            self.get_logger().info(
+                f'[통] 놓기 완료. {BIN_RELEASE_DWELL_SEC}초 대기.'
+            )
+        else:
+            # 열매를 쥔 채로 다음 사이클에 들어간다. 다음 사이클의 [2/5]
+            # 그리퍼 열기가 **정렬 위치에서** 열어 버리므로(= 베드 위에
+            # 떨어뜨림) 반드시 눈에 띄게 남긴다.
+            self.get_logger().error(
+                '[통] 놓기 실패 — 그리퍼가 열매를 쥔 채다. 다음 사이클의 '
+                '[2/5]가 베드 위에서 열게 되므로 수동 확인 필요.'
+            )
+        self._bin_release_dwell_timer = self.create_timer(
+            BIN_RELEASE_DWELL_SEC, self._on_bin_release_dwell_done
+        )
+
+    def _on_bin_release_dwell_done(self) -> None:
+        self._bin_release_dwell_timer.cancel()
+        self._bin_release_dwell_timer = None
+        self._finish_cycle()
+
+    def _finish_cycle(self) -> None:
+        """사이클 종료 — 결과 발행과 busy 해제. 복귀(통 자세면 놓기까지)가
+        끝난 뒤 한 번만 불린다.
+
+        harvest_sequence_node 등 여러 목표를 순차 발행하는 상위 로직이 이
+        결과를 보고 다음 목표를 보낼 타이밍을 잡는다(2026-07-24, "수확 순차
+        처리" 로드맵). 복귀·놓기까지 끝난 뒤에 발행해야 다음 목표가 곧바로
+        정렬로 들어갈 수 있고, 통 자세일 때는 **열매를 손에서 놓은 뒤**임이
+        보장된다.
+        """
         result_msg = Bool()
         result_msg.data = bool(self._pending_result_succeeded)
         self._plan_result_publisher.publish(result_msg)
