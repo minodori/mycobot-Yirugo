@@ -46,6 +46,10 @@ MoveIt이 실제 장애물을 전혀 못 보니 팔 주변 안전을 사람이 �
 
   ros2 launch mycobot_280_pick pick_pipeline.launch.py \
       target_source:=file targets_file:=bags/lab_bed_detections_fixed.json
+
+[2026-08-03] RViz도 이 런치가 띄운다(config/harvest_view.rviz — 팔 + octomap
+voxel + 목표 구, 포인트클라우드 없음). 창이 하나만 뜨도록 MoveIt 기본 RViz는
+자동으로 끈다. 옛 동작(MoveIt 기본 RViz)이 필요하면 `rviz_config:=''`.
 """
 
 import os
@@ -54,7 +58,11 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
@@ -80,6 +88,22 @@ def generate_launch_description():
         )
     )
 
+    # [2026-08-03] RViz를 **이 런치가 우리 설정으로** 띄운다.
+    #
+    # 예전엔 demo_octomap.launch.py가 MoveIt 기본 RViz를 띄우고, 수확 화면을
+    # 보려면 rviz2를 따로 하나 더 실행해야 했다 — 창이 두 개 떴다.
+    # 비우면(rviz_config:='') 옛 동작(MoveIt 기본 RViz)으로 돌아간다.
+    ld.add_action(
+        DeclareLaunchArgument(
+            'rviz_config',
+            default_value='harvest_view.rviz',
+            description=(
+                'config/ 아래 RViz 설정 파일 이름. 기본은 수확 화면'
+                '(팔 + octomap voxel + 목표 구, 포인트클라우드 없음). '
+                "''로 두면 MoveIt 기본 RViz가 대신 뜬다"
+            ),
+        )
+    )
     ld.add_action(
         DeclareLaunchArgument(
             'enable_unmasked_cloud',
@@ -152,6 +176,12 @@ def generate_launch_description():
             ),
             launch_arguments={
                 'enable_octomap': LaunchConfiguration('enable_octomap'),
+                # 우리가 직접 띄우므로 MoveIt 기본 RViz는 끈다(창 두 개 방지).
+                # rviz_config가 비어 있으면 그쪽을 그대로 쓴다.
+                'use_rviz': PythonExpression(
+                    ["'false' if '",
+                     LaunchConfiguration('rviz_config'),
+                     "' else 'true'"]),
             }.items(),
         )
     )
@@ -219,6 +249,21 @@ def generate_launch_description():
                 'target_source': LaunchConfiguration('target_source'),
                 'targets_file': LaunchConfiguration('targets_file'),
             }],
+        )
+    )
+
+    # ---- RViz (rviz_config를 준 경우에만) ----
+    ld.add_action(
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            arguments=['-d', PathJoinSubstitution([
+                FindPackageShare('mycobot_280_pick'), 'config',
+                LaunchConfiguration('rviz_config'),
+            ])],
+            condition=IfCondition(PythonExpression(
+                ["'true' if '", LaunchConfiguration('rviz_config'), "' else 'false'"])),
         )
     )
 

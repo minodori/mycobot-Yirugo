@@ -330,11 +330,15 @@ x1/x2/x3/x5`가 있다. (RViz **MotionPlanning 패널**의 Velocity Scaling 슬�
 
 ## 4.3 실물 세션 화면 구성
 
-**RViz 설정을 따로 뒀다** — 실물 수확을 볼 때는 이걸 쓴다:
+**런치가 RViz까지 띄운다** — 명령은 한 줄이다:
 
 ```bash
-rviz2 -d src/mycobot_280_pick/config/harvest_view.rviz
+ros2 launch mycobot_280_pick pick_pipeline.launch.py cycle:=bsc
 ```
+
+`config/harvest_view.rviz`로 창이 **하나만** 뜬다(MoveIt 기본 RViz는 자동으로
+꺼진다). 옛 동작이 필요하면 `rviz_config:=''`, 다른 설정을 쓰려면
+`rviz_config:=sweep_view.rviz`처럼 파일 이름만 준다.
 
 | 보이는 것 | 무엇 |
 |---|---|
