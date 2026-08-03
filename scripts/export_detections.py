@@ -199,9 +199,17 @@ def main():
     rclpy.init()
     node = ExportNode()
     node.get_logger().info(
-        f'tomato_candidates 대기 중... (최대 {args.timeout:.0f}초) — 판단이 이미 '
-        f'끝났다면 yolo_d435_detector_node를 재시작할 것'
-    )
+        f'tomato_candidates 대기 중... (최대 {args.timeout:.0f}초)')
+    # [2026-08-03] 안 오는 이유가 하나가 아니다. 실물에서 60초를 기다렸다가
+    # 빈손으로 끝난 적이 있어(판단이 얼린 채였고 팔은 look pose에 서 있었다),
+    # 무엇을 확인해야 하는지 여기서 바로 알려준다.
+    node.get_logger().info(
+        '안 오면: (1) 판단이 얼려 있는지 — 수확 시퀀스를 emergency_stop으로 '
+        '멈추면 얼린 채 남는다. '
+        'ros2 service call /yolo_d435_detector_node/set_judgment_enabled '
+        'std_srvs/srv/SetBool "{data: true}" 로 풀면 look pose에 서 있는 채로도 '
+        '다시 누적한다. (2) 팔이 look pose에 있는지(게이트는 /joint_states로 '
+        '판정한다). (3) 그래도 안 오면 yolo_d435_detector_node 재시작.')
     deadline = node.get_clock().now().nanoseconds * 1e-9 + args.timeout
     while node.rows is None:
         rclpy.spin_once(node, timeout_sec=0.1)
@@ -209,7 +217,10 @@ def main():
             break
 
     if node.rows is None:
-        node.get_logger().error('후보를 받지 못했다. 위 주의사항 참고.')
+        node.get_logger().error(
+            '후보를 받지 못했다 — 위 세 가지를 순서대로 확인할 것. '
+            '판단은 look pose에 **들어오는 순간** 1회만 돌므로, 이미 서 있는 '
+            '상태로 기다리기만 해서는 영영 안 온다.')
         node.destroy_node()
         rclpy.shutdown()
         raise SystemExit(1)

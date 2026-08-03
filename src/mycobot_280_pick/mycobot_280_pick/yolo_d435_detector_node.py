@@ -507,9 +507,15 @@ class YoloD435DetectorNode(Node):
         """[2026-08-02] 판단(누적 -> candidates/target_point)을 켜고 끈다.
 
         끄면 진행 중인 누적도 취소한다 — 안 그러면 얼린 직후 타이머가 한 번 더
-        터져 판단이 나간다. 켤 때는 여기서 누적을 시작하지 않는다: 팔이 look
-        pose에 **들어오는 순간**(_on_joint_states)이 시작점이어야 이미 지나간
-        방문을 뒤늦게 판단하지 않는다.
+        터져 판단이 나간다.
+
+        **켤 때 팔이 이미 look pose에 있으면 그 자리에서 다시 누적을 시작한다.**
+        처음엔 "들어오는 순간만 시작점"으로 두었는데, 실물에서 막혔다: 시퀀스를
+        emergency_stop으로 멈추면 판단이 얼린 채로 남고(해제는 시퀀스 정상
+        종료 때만 불린다), 팔은 look pose에 서 있으니 **다시 들어오는 순간이
+        영영 안 온다.** 그 상태에서 export_detections.py가 60초를 기다려도
+        후보를 못 받는다(실제로 겪었다). 해제 = "지금부터 다시 봐라"로 읽는
+        것이 맞다.
         """
         want = bool(request.data)
         if want == self._judgment_enabled:
@@ -520,11 +526,16 @@ class YoloD435DetectorNode(Node):
         self._judgment_enabled = want
         if not want:
             self._reset_judgment_state()
-        self.get_logger().info(
-            '판단 해제 — look pose에 들어오면 다시 누적한다.' if want
-            else '판단 얼림 — 수확 시퀀스가 끝날 때까지 candidates/target_point를 '
-                 '내지 않는다.'
-        )
+            self.get_logger().info(
+                '판단 얼림 — 수확 시퀀스가 끝날 때까지 candidates/target_point를 '
+                '내지 않는다.')
+        elif self._at_look_pose:
+            self._start_accumulation()      # 이미 look pose면 그 자리에서 다시
+            self.get_logger().info(
+                f'판단 해제 — 이미 look pose라 {ACCUMULATION_WINDOW_SEC}초 누적을 '
+                '바로 시작한다.')
+        else:
+            self.get_logger().info('판단 해제 — look pose에 들어오면 누적한다.')
         response.success = True
         response.message = '판단 켜짐' if want else '판단 얼림'
         return response
