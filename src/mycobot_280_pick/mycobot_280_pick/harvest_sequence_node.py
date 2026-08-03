@@ -376,7 +376,16 @@ class HarvestSequenceNode(Node):
         for i, item in enumerate(items):
             m = Marker()
             m.header.frame_id = frame_id
-            m.header.stamp = self.get_clock().now().to_msg()
+            # [2026-08-03] stamp를 **0**으로 둔다 = "가장 최근 변환을 써라".
+            #
+            # 현재 시각을 찍었더니 RViz가 변환을 못 했다:
+            #   No transform to fixed frame [g_base] ... Lookup would require
+            #   extrapolation into the future
+            # 미리보기는 카메라 프레임이라 TF를 타는데, 마커를 만드는 순간의
+            # 시각까지 TF가 아직 안 와 있어서 생기는 경합이다. 마커는 "지금
+            # 이 순간의 관측"이 아니라 "여기에 목표가 있다"는 표시이므로
+            # 최신 변환을 쓰는 것이 맞다.
+            m.header.stamp = Time().to_msg()
             m.ns = 'harvest_targets'
             m.id = i
             m.type = Marker.SPHERE
@@ -432,10 +441,40 @@ class HarvestSequenceNode(Node):
         """
         if not self._camera_frame_id:
             return
-        items = [{'point': Point(x=x, y=y, z=z),
-                  'radius_m': radius_m or DEFAULT_TARGET_RADIUS_M}
-                 for _cid, x, y, z, _conf, radius_m in self._latest_candidates]
-        array = self._marker_array(items, self._camera_frame_id)
+
+        # [2026-08-03] **g_base로 변환해서 낸다.**
+        #
+        # 원래는 카메라 프레임 그대로 내고 TF를 RViz에 맡겼는데, 실물에서
+        # 구가 안 떴다:
+        #   No transform to fixed frame [g_base] ... extrapolation into the future
+        # stamp를 0으로 바꿔도 카메라 프레임에 의존하는 한 경합이 남는다.
+        # 시퀀스가 시작되면 잘 보이던 이유도 이것이다 — 그때는 g_base로 변환한
+        # 뒤 그리기 때문이다.
+        #
+        # 미리보기가 **시작 전에** 보여야 하는 이유가 분명하다: 시작하고 나서
+        # 보이면 이미 팔이 움직이고 있어서 늦다. 후보는 look pose에서만 나오고
+        # 그 시점의 TF로 변환하면 되므로, 큐를 만들 때(_queue_from_yolo)와
+        # 똑같이 여기서 변환한다. 변환이 안 되면 조용히 건너뛴다(그 프레임은
+        # 어차피 못 그린다).
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                BASE_LINK_NAME, self._camera_frame_id, Time(),
+                timeout=rclpy.duration.Duration(seconds=0.2),
+            )
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException):
+            return
+
+        items = []
+        for _cid, x, y, z, _conf, radius_m in self._latest_candidates:
+            stamped = PointStamped()
+            stamped.header.frame_id = self._camera_frame_id
+            stamped.point = Point(x=x, y=y, z=z)
+            items.append({
+                'point': do_transform_point(stamped, transform).point,
+                'radius_m': radius_m or DEFAULT_TARGET_RADIUS_M,
+            })
+        array = self._marker_array(items, BASE_LINK_NAME)
         if not array.markers:
             # 후보가 사라졌으면(look pose 이탈 등) 남은 구를 지운다.
             clear = Marker()
