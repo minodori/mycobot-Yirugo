@@ -1213,6 +1213,11 @@ class CoordToGoalNode(Node):
         self._moveit2.num_planning_attempts = PLANNING_ATTEMPTS
         self._moveit2.max_velocity = VELOCITY_SCALING
         self._moveit2.max_acceleration = ACCELERATION_SCALING
+        # 여기서 한 번 박아 두면 speed_scale을 나중에 바꿔도 **일반 구간**
+        # (대기 자세 경유·정렬·복귀)은 그대로였다 — 배수를 걸었는데 "차이가
+        # 없다"의 원인이었다. 그래서 각 동작 직전에 _apply_speed로 다시 건다
+        # (아래 _start_planning / _move_arm / _start_return_to_waiting_pose /
+        # _on_go_to_look_pose_request). 접근·후퇴는 원래 각자 걸고 있었다.
 
         # [2026-07-27, 그리퍼 actuation 1단계] arm_group과 별도 플래닝
         # 그룹이라 별도 MoveIt2(정확히는 pose 관련 메서드가 빠진 하위 클래스
@@ -1386,6 +1391,7 @@ class CoordToGoalNode(Node):
             return response
 
         self._busy = True
+        self._apply_speed(VELOCITY_SCALING, ACCELERATION_SCALING, 'look pose 이동')
         self.get_logger().info('go_to_look_pose 요청 수신, look pose로 이동 시작')
         self._moveit2.move_to_configuration(
             LOOK_POSE_JOINT_POSITIONS, joint_names=JOINT_NAMES
@@ -1943,6 +1949,8 @@ class CoordToGoalNode(Node):
             self.get_logger().info(
                 f'[0/5 {self._waiting_pose_label}] 경유 이동 중...'
             )
+            self._apply_speed(VELOCITY_SCALING, ACCELERATION_SCALING,
+                              f'[0/5 {self._waiting_pose_label}]')
             self._moveit2.move_to_configuration(
                 self._waiting_pose_joints, joint_names=JOINT_NAMES
             )
@@ -2365,6 +2373,9 @@ class CoordToGoalNode(Node):
         # 0.2에서도 정렬이 실패하면 0.3까지 완화할 것. 반대로 0.2가 안정적이면
         # 접근 구간 관절 이동량(이전 실측 154°/4cm)이 얼마나 줄었는지로 효과를
         # 판정할 수 있음.
+        # [2026-08-03] 정렬(1/5)도 speed_scale을 타야 한다 — 화면에서 가장
+        # 길게 보이는 구간이 여기다.
+        self._apply_speed(VELOCITY_SCALING, ACCELERATION_SCALING, '[1/5 정렬]')
         self._moveit2.move_to_pose(
             position=position,
             quat_xyzw=quat,
@@ -2740,6 +2751,7 @@ class CoordToGoalNode(Node):
         self._return_dwell_timer = None
 
         self._return_pose_label = self._waiting_pose_label
+        self._apply_speed(VELOCITY_SCALING, ACCELERATION_SCALING, '복귀')
         self.get_logger().info(f'{self._waiting_pose_label}로 복귀 중...')
         self._moveit2.move_to_configuration(
             self._waiting_pose_joints, joint_names=JOINT_NAMES
@@ -2817,8 +2829,7 @@ class CoordToGoalNode(Node):
         # [2026-07-27] 후퇴(5/5) 시작 시 낮춘 속도(RETREAT_VELOCITY_SCALING)를
         # 다음 사이클(정렬)이 정상 속도로 시작하도록 원상복구. 정상 속도
         # 그대로였던 경로(파지 전 실패로 abort된 경우)에도 no-op이라 안전함.
-        self._moveit2.max_velocity = VELOCITY_SCALING
-        self._moveit2.max_acceleration = ACCELERATION_SCALING
+        self._apply_speed(VELOCITY_SCALING, ACCELERATION_SCALING)
 
         # [2026-08-02] 통 자세에 열매를 쥔 채 도착했으면 여기가 놓는 자리다.
         # **복귀에 실패했으면 절대 열지 않는다** — 팔이 통 위에 있다는 보장이
