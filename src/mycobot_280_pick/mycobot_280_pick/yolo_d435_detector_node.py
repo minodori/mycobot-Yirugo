@@ -272,6 +272,17 @@ def _classify_by_color(bgr, x1, y1, x2, y2):
     return best if counts[best] / n >= COLOR_MIN_RATIO else None
 
 
+# [2026-08-03] 사본이 셋이 되려던 참에 공용 모듈(look_pose.py)을 만들었다.
+# 이 파일의 값은 그대로 두되, **기동 시 어긋났는지 검사한다** — 한쪽만 고치면
+# 에러 없이 게이트만 조용히 안 열리는 종류의 버그라 눈으로는 못 찾는다.
+try:
+    from mycobot_280_pick import look_pose as _look_pose_shared
+    _look_pose_shared.assert_matches(JOINT_NAMES, LOOK_POSE_JOINT_POSITIONS,
+                                     source='yolo_d435_detector_node')
+except ImportError:
+    pass
+
+
 def _is_near_look_pose(positions_by_name: dict) -> bool:
     for name, look_value in zip(JOINT_NAMES, LOOK_POSE_JOINT_POSITIONS):
         current_value = positions_by_name.get(name)

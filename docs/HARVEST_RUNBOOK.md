@@ -328,6 +328,40 @@ x1/x2/x3/x5`가 있다. (RViz **MotionPlanning 패널**의 Velocity Scaling 슬�
 
 ---
 
+## 4.3 수확 중 화면이 요동칠 때 (장면 고정)
+
+카메라가 **eye-in-hand**(joint6)라 팔이 움직이는 동안에도 클라우드를 계속 내면
+`occupancy_map_monitor`가 그때그때 본 것을 합치고 시야를 따라 지운다. 수확 중
+장면이 쉬지 않고 바뀌어 무엇을 보고 있는지 읽기 어렵다.
+
+> **`sync_plan`을 안 켠 세션에서는 더 나쁘다.** 실물 팔은 가만히 있는데 카메라
+> TF는 `/joint_states`(= 시뮬 팔)로 계산되므로, **정지한 카메라가 본 클라우드를
+> 움직이는 팔의 위치에 갖다 붙인다.** 장면이 작업공간 전체에 번져 쌓인다.
+
+look pose에 있을 때만 클라우드를 내게 막는다. 이 노드는
+`demo_octomap.launch.py`가 띄우므로 **실행 중에 파라미터로** 켠다:
+
+```bash
+ros2 param set /pointcloud_tomato_filter_node look_pose_gate true
+ros2 param set /pointcloud_tomato_filter_node look_pose_gate false   # 되돌리기
+```
+
+켜지면 로그에 `look pose 이탈 — 클라우드 발행 중지(장면 고정)`가 찍힌다.
+
+**무엇이 바뀌고 무엇이 안 바뀌나:**
+
+| | 게이트 켜면 |
+|---|---|
+| 포인트클라우드 표시 | look pose에서 본 마지막 장면으로 **고정**된다 |
+| octomap voxel | 목표마다 `/clear_octomap`이 여전히 돌므로 **수확 중에는 비어 있다**(다음 look pose 방문에서 다시 쌓인다) |
+| 계획 동작 | **안 바뀐다** — 지금처럼 장애물 회피가 사실상 꺼진 상태 그대로다 |
+
+octomap까지 look pose 장면으로 **고정**하려면 목표마다 지우는 것을 시퀀스마다로
+바꿔야 하는데, 그건 **장애물 회피를 켜는 결정**이다(핸드오프 5절: 성공률
+100% → 77%, 직진 12/15 → 3/13). 핸드오프 7절 남은 일 3번이 그 항목이다.
+
+---
+
 ## 5. 실물 연결
 
 구조: **노트북(계획) → 네트워크 → RPi `sync_plan` → USB → 로봇**.

@@ -52,6 +52,7 @@ import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -79,6 +80,17 @@ def generate_launch_description():
         )
     )
 
+    ld.add_action(
+        DeclareLaunchArgument(
+            'enable_unmasked_cloud',
+            default_value='true',
+            description=(
+                'RViz에서 **실제 토마토가 보이게** 마스킹 안 한 클라우드를 따로 '
+                '발행한다(/camera/camera/depth/color/points_unmasked, 2Hz). '
+                'octomap에는 안 들어간다 — 순수 육안 확인용. CPU가 아까우면 false.'
+            ),
+        )
+    )
     ld.add_action(
         DeclareLaunchArgument(
             'speed_scale',
@@ -168,6 +180,28 @@ def generate_launch_description():
                 'speed_scale': LaunchConfiguration('speed_scale'),
                 'dwell_scale': LaunchConfiguration('dwell_scale'),
             }],
+        )
+    )
+
+    # [2026-08-03] 마스킹 **안 한** 클라우드를 별도 토픽으로 하나 더 낸다.
+    #
+    # octomap용 필터는 bbox로 열매를 일부러 지운다(따려는 열매 자신이 장애물이
+    # 되는 것을 막으려고 — 핸드오프 함정 11). 그래서 RViz에서 토마토 자리가
+    # **비어 보인다.** 같은 노드에 boxes_topic을 존재하지 않는 이름으로 주면
+    # 마스킹이 없어지고, 출력 토픽이 다르므로 occupancy_map_monitor는 이걸
+    # 안 본다(sensors_3d.yaml은 points_filtered만 구독한다).
+    # scene_replay.launch.py가 쓰던 방식 그대로다.
+    ld.add_action(
+        Node(
+            package='mycobot_280_pick',
+            executable='pointcloud_tomato_filter_node',
+            name='pointcloud_unmasked_node',
+            parameters=[{
+                'output_topic': '/camera/camera/depth/color/points_unmasked',
+                'boxes_topic': '__no_boxes__',   # 존재하지 않는 토픽 = 마스킹 없음
+                'publish_rate_hz': 2.0,          # 육안 확인용이라 낮게
+            }],
+            condition=IfCondition(LaunchConfiguration('enable_unmasked_cloud')),
         )
     )
 

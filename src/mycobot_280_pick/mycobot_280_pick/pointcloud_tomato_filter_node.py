@@ -92,8 +92,10 @@ from cv_bridge import CvBridge
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
+from sensor_msgs.msg import CameraInfo, Image, JointState, PointCloud2, PointField
 from std_msgs.msg import Float32MultiArray
+
+from mycobot_280_pick import look_pose
 
 DEFAULT_DEPTH_TOPIC = '/camera/camera/aligned_depth_to_color/image_raw'
 DEFAULT_CAMERA_INFO_TOPIC = '/camera/camera/aligned_depth_to_color/camera_info'
@@ -174,6 +176,21 @@ class PointcloudTomatoFilterNode(Node):
         self.declare_parameter('publish_rgb', DEFAULT_PUBLISH_RGB)
         self.declare_parameter('publish_rate_hz', DEFAULT_PUBLISH_RATE_HZ)
         self.declare_parameter('restamp_now', DEFAULT_RESTAMP_NOW)
+        # [2026-08-03] look pose 게이트.
+        #
+        # 카메라가 eye-in-hand(joint6)라, 팔이 움직이는 동안에도 클라우드를 계속
+        # 내면 occupancy_map_monitor가 **팔이 있는 자리에서 본 것**을 계속 합치고
+        # 시야를 따라 지운다. 화면에서는 수확 중 장면이 쉬지 않고 요동친다는
+        # 뜻이고, 실제로 "무엇을 보고 있는지 헷갈린다"는 지적이 나왔다.
+        #
+        # true면 팔이 look pose 근처에 있을 때만 발행한다 — 관측은 look pose에서
+        # 한 번이면 충분하다는 이 팔의 look-then-move 구조와 같은 전제다
+        # (yolo_d435_detector_node의 판단 게이팅과 같은 판정).
+        #
+        # 기본은 false다. scene_replay 세션은 팔이 look pose에 없을 수도 있는데
+        # 거기서 켜지면 클라우드가 아예 안 나온다.
+        self.declare_parameter('look_pose_gate', False)
+        self.declare_parameter('look_pose_tolerance_rad', 0.08)
 
         depth_topic = (
             self.get_parameter('depth_topic').get_parameter_value().string_value
@@ -231,6 +248,18 @@ class PointcloudTomatoFilterNode(Node):
         # 구독을 요청함(2026-07-24 실물 테스트로 확인 — "incompatible QoS ...
         # Last incompatible policy: RELIABILITY" 경고 발생, best-effort로는
         # 메시지가 전혀 전달 안 됨). 그래서 기본 QoS(reliable, keep-last)를 씀.
+        self._look_pose_tolerance = (
+            self.get_parameter('look_pose_tolerance_rad')
+            .get_parameter_value().double_value
+        ) or 0.08
+        self._at_look_pose = False
+        # **구독은 항상 걸어 둔다.** 게이트를 실행 중에 켤 수 있어야 하는데
+        # (이 노드는 demo_octomap.launch.py가 띄우므로 런치 인자를 고치려면
+        # vendor 파일을 건드려야 한다), 그때 가서 구독을 만들면 첫 판정까지
+        # 공백이 생긴다. /joint_states는 가벼우니 항상 받는다.
+        self.create_subscription(JointState, 'joint_states',
+                                 self._on_joint_states, 10)
+
         self._publisher = self.create_publisher(PointCloud2, output_topic, 10)
         self._boxes_sub = self.create_subscription(
             Float32MultiArray, boxes_topic, self._on_boxes, 10
@@ -260,6 +289,25 @@ class PointcloudTomatoFilterNode(Node):
             f'{", restamp_now(재생용)" if self._restamp_now else ""})'
         )
 
+    def _gate_enabled(self) -> bool:
+        """look_pose_gate 파라미터를 **매번 다시 읽는다** — 실행 중에
+        `ros2 param set /pointcloud_tomato_filter_node look_pose_gate true`로
+        켜고 끌 수 있어야 한다."""
+        try:
+            return bool(self.get_parameter('look_pose_gate').value)
+        except Exception:
+            return False
+
+    def _on_joint_states(self, msg: JointState) -> None:
+        at = look_pose.is_near_look_pose(dict(zip(msg.name, msg.position)),
+                                         self._look_pose_tolerance)
+        if at != self._at_look_pose:
+            self._at_look_pose = at
+            if self._gate_enabled():
+                self.get_logger().info(
+                    'look pose 도착 — 클라우드 발행 재개' if at
+                    else 'look pose 이탈 — 클라우드 발행 중지(장면 고정)')
+
     def _on_color(self, msg: Image) -> None:
         self._latest_color = self._bridge.imgmsg_to_cv2(
             msg, desired_encoding='bgr8'
@@ -277,6 +325,11 @@ class PointcloudTomatoFilterNode(Node):
 
     def _on_depth(self, depth_msg: Image) -> None:
         if self._intrinsics is None:
+            return
+
+        # look pose 게이트(위 파라미터 설명). 역투영 **앞에서** 잘라야 CPU도
+        # 같이 아낀다.
+        if self._gate_enabled() and not self._at_look_pose:
             return
 
         # 주파수 상한 초과분은 여기서 버림 — 아래 numpy 역투영/직렬화가 이 노드
