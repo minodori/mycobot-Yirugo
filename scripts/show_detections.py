@@ -31,6 +31,62 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 BASE_LINK_NAME = 'g_base'
 
+
+def annotate_image(args):
+    """검출 좌표를 카메라 화면에 역투영해 번호를 얹고 PNG로 저장한다.
+
+    좌표계 주의: 파일의 camera_x/y/z는 **컬러 optical 프레임** 기준이고
+    (export_detections.py가 그렇게 저장한다) 주석 이미지도 같은 프레임이라
+    핀홀 식 하나로 바로 픽셀이 된다. g_base 좌표를 쓰면 TF를 타야 하고 팔이
+    움직인 뒤에는 틀어진다 — 그래서 camera_* 쪽을 쓴다.
+    """
+    import cv2
+    from cv_bridge import CvBridge
+    from sensor_msgs.msg import CameraInfo, Image
+
+    with open(args.targets, encoding='utf-8') as fh:
+        dets = json.load(fh)['detections']
+    picked = set(args.pick)
+
+    rclpy.init()
+    node = Node('annotate_detections')
+    state = {'K': None, 'img': None}
+    node.create_subscription(CameraInfo, args.camera_info_topic,
+                             lambda m: state.update(K=m.k), 10)
+    node.create_subscription(Image, args.image_topic,
+                             lambda m: state.update(img=m), 10)
+    import time
+    end = time.time() + 15
+    while time.time() < end and (state['K'] is None or state['img'] is None):
+        rclpy.spin_once(node, timeout_sec=0.2)
+    if state['K'] is None or state['img'] is None:
+        raise SystemExit(
+            f'카메라 입력을 못 받았다(K={state["K"] is not None}, '
+            f'image={state["img"] is not None}). 파이프라인이 떠 있는지, '
+            f'토픽 이름이 맞는지 확인할 것: {args.image_topic}')
+
+    fx, fy, cx, cy = state['K'][0], state['K'][4], state['K'][2], state['K'][5]
+    frame = CvBridge().imgmsg_to_cv2(state['img'], desired_encoding='bgr8').copy()
+
+    for i, d in enumerate(dets, 1):
+        if 'camera_z' not in d or not d['camera_z']:
+            continue
+        u = int(round(fx * d['camera_x'] / d['camera_z'] + cx))
+        v = int(round(fy * d['camera_y'] / d['camera_z'] + cy))
+        on = (not picked) or (i in picked)
+        color = (0, 215, 255) if on else (150, 150, 150)   # BGR: 노랑 / 회색
+        radius = 16 if on else 10
+        cv2.circle(frame, (u, v), radius, color, -1)
+        cv2.circle(frame, (u, v), radius, (0, 0, 0), 2)
+        cv2.putText(frame, str(i), (u - 8 if i < 10 else u - 15, v + 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6 if on else 0.45,
+                    (0, 0, 0), 2, cv2.LINE_AA)
+    cv2.imwrite(args.annotate_image, frame)
+    print(f'저장: {args.annotate_image}  (검출 {len(dets)}개'
+          + (f', 강조 {sorted(picked)}' if picked else '') + ')')
+    node.destroy_node()
+    rclpy.shutdown()
+
 # 고른 것 = 노랑(크게), 나머지 = 어두운 회색. 라벨은 흰색.
 PICKED_COLOR = (1.00, 0.85, 0.10, 1.00)
 OTHER_COLOR = (0.40, 0.40, 0.40, 0.35)
@@ -45,7 +101,20 @@ def main():
                    help='번호를 구 위 몇 m에 띄울지')
     p.add_argument('--seconds', type=float, default=0.0,
                    help='이 시간 뒤 종료(0이면 Ctrl+C까지 유지)')
+    # [2026-08-03] RViz 마커만으로는 **실물의 어느 열매인지** 대조가 안 됐다.
+    # 카메라 화면(YOLO 주석 이미지)에는 클래스와 confidence만 있고 번호가 없다.
+    # 파일에 camera_x/y/z가 같이 저장돼 있으므로 핀홀로 역투영해 그 화면에
+    # 번호를 얹어 PNG로 떨군다 — 화면과 실물을 눈으로 맞추는 데 이게 제일 빠르다.
+    p.add_argument('--annotate-image', metavar='OUT.png', default=None,
+                   help='YOLO 주석 이미지에 번호를 그려 PNG로 저장한다')
+    p.add_argument('--image-topic', default='/tomato_detections_image')
+    p.add_argument('--camera-info-topic',
+                   default='/camera/camera/aligned_depth_to_color/camera_info')
     args = p.parse_args()
+
+    if args.annotate_image:
+        annotate_image(args)
+        return
 
     with open(args.targets, encoding='utf-8') as fh:
         dets = json.load(fh)['detections']

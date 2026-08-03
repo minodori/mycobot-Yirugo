@@ -483,6 +483,23 @@ class HarvestSequenceNode(Node):
         self._waiting_for_result = False
         self.get_logger().info(f'이전 목표 결과: {"성공" if msg.data else "실패"}')
 
+        # [2026-08-03, 실물] 실패면 **큐를 비우고 멈춘다.**
+        #
+        # 예전엔 성공/실패 무관하게 다음 목표를 보냈다. 그런데 실물에서
+        # 대기 자세 복귀가 실패했을 때 그대로 다음 목표로 넘어갔고, 팔이
+        # 열매를 쥔 채 베드를 가로질러 이웃 토마토를 쳤다. 실패는 대개
+        # "팔이 어디 있는지 모른다"는 뜻이라, 그 상태에서 다음 목표로 가는
+        # 것은 어떤 경로가 될지 모르는 이동이다.
+        #
+        # 사람이 상태를 확인하고 다시 시작하는 것이 맞다.
+        if not msg.data and self._queue:
+            dropped = len(self._queue)
+            self._queue = []
+            self.get_logger().error(
+                f'목표 실패 — 남은 {dropped}개를 버리고 시퀀스를 멈춘다. '
+                '팔 상태를 확인하고 /go_to_look_pose로 정렬한 뒤 '
+                '/start_harvest_sequence를 다시 부를 것.')
+
         if self._next_target_timer is not None:
             self._next_target_timer.cancel()
         self._next_target_timer = self.create_timer(

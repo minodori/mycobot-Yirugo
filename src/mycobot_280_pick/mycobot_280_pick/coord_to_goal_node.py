@@ -2824,7 +2824,20 @@ class CoordToGoalNode(Node):
             if self._waiting_pose_mode == 'look':
                 self._verify_approach_reference_point()
         else:
-            self.get_logger().warn(f'{label} 복귀 실패 — 팔 상태 수동 확인 필요.')
+            # [2026-08-03, 실물] 여기서 경고만 하고 진행했더니 사고가 났다.
+            # 통 자세 복귀가 실패했는데 시퀀스가 다음 목표로 그냥 넘어갔고,
+            # **열매를 쥔 채** 베드를 가로질러 이동하며 이웃 토마토를 쳤다
+            # (이웃 열매는 장애물이 아니다 — 핸드오프 함정 17).
+            #
+            # 복귀 실패는 "팔이 어디 있는지 모른다"와 같은 뜻이다. 그 상태에서
+            # 다음 목표로 가면 어떤 경로로 갈지 아무도 모른다. 그래서 결과를
+            # 실패로 바꿔 **상위 시퀀스가 멈추게** 한다.
+            self._pending_result_succeeded = False
+            self.get_logger().error(
+                f'{label} 복귀 실패 — 팔 위치를 신뢰할 수 없어 이 사이클을 '
+                '실패로 보고한다. 다음 목표로 진행하지 말 것(시퀀스는 멈춘다). '
+                '팔 상태를 눈으로 확인하고 /go_to_look_pose로 정렬한 뒤 다시 '
+                '시작할 것.')
 
         # [2026-07-27] 후퇴(5/5) 시작 시 낮춘 속도(RETREAT_VELOCITY_SCALING)를
         # 다음 사이클(정렬)이 정상 속도로 시작하도록 원상복구. 정상 속도
