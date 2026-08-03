@@ -289,6 +289,45 @@ object는 둘 다에 안 지워진다.
 
 ---
 
+## 4.2 팔이 너무 느릴 때 (재생 속도)
+
+FakeSystem에서 사이클을 볼 때 팔이 느린 것은 **속도·가속 스케일링**과 **단계 사이
+정지 시간** 둘이 정한다. 지금 값(`coord_to_goal_node.py` 상수):
+
+| 구간 | 속도 | 가속 |
+|---|---|---|
+| 일반(경유·정렬·복귀) | `VELOCITY_SCALING` 0.2 | `ACCELERATION_SCALING` 0.1 |
+| [3/5] 직진 접근 | 0.2 | 0.2 |
+| [5/5] 후퇴 | 0.2 | 0.2 |
+
+정지 시간은 목표당 약 6.7초다(파지 후 2.0 + 복귀 전 1.5 + octomap clear 1.2 +
+다음 목표 1.5 + 놓기 0.5).
+
+바꾸는 법 — 셋 다 **재시작 없이** 먹는다:
+
+```bash
+# 런치할 때
+ros2 launch mycobot_280_pick pick_pipeline.launch.py cycle:=bsc \
+    speed_scale:=3.0 dwell_scale:=0.3
+
+# 이미 돌고 있으면 (다음 동작부터 반영)
+ros2 param set /coord_to_goal_node speed_scale 3.0
+ros2 param set /coord_to_goal_node dwell_scale 0.3
+```
+
+**RViz에서도 된다** — `rviz_control_panel_node`의 우클릭 메뉴에 `재생 속도 >
+x1/x2/x3/x5`가 있다. (RViz **MotionPlanning 패널**의 Velocity Scaling 슬라이더는
+이것과 무관하다 — 그건 그 패널이 직접 보내는 계획에만 붙고, 우리 사이클은
+`coord_to_goal_node`가 계획한다.)
+
+> **이 배수는 시뮬 전용이 아니다.** 계획한 궤적의 시간축이 곧 실물 속도다
+> (`sync_plan`은 `/joint_states`를 중계할 뿐이다). 그래서 노드가 **실물
+> 브릿지(`/release_servos` 서비스)가 붙어 있으면 speed_scale을 1.0으로 자르고
+> 경고한다.** 실물 속도를 진짜로 바꾸려면 `VELOCITY_SCALING` 상수를 튜닝할 것
+> — 근거는 `docs/SPEED_TUNING_HANDOFF.md`에 있다.
+
+---
+
 ## 5. 실물 연결
 
 구조: **노트북(계획) → 네트워크 → RPi `sync_plan` → USB → 로봇**.

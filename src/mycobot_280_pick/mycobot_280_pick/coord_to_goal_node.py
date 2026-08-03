@@ -65,6 +65,7 @@ MoveGroup 액션 경로를 쓰고(=spin_once 호출 코드 경로 자체를 안 
 
 import functools
 import math
+import time
 
 from geometry_msgs.msg import Point, PointStamped, Pose, PoseStamped
 from moveit_msgs.msg import (
@@ -1131,6 +1132,23 @@ class CoordToGoalNode(Node):
         # 실물에서 문제가 나면 재빌드 없이 되돌릴 수 있어야 한다:
         #   ros2 run ... coord_to_goal_node --ros-args -p waiting_pose:=asc
         #   ros2 launch mycobot_280_pick pick_pipeline.launch.py cycle:=asc
+        # [2026-08-03] 데모·시뮬 재생 속도 조절.
+        #
+        # speed_scale: 아래 여섯 스케일링(일반/접근/후퇴의 속도·가속)에 곱한다.
+        #   1.0이 지금까지의 동작이고, 결과는 각각 1.0을 넘지 않게 자른다.
+        #   FakeSystem에서 "애니메이션이 느리다"를 고치는 정식 손잡이다.
+        # dwell_scale: 단계 사이 정지 시간(파지 후 2.0초, 복귀 전 1.5초,
+        #   octomap clear 1.2초, 통에 놓은 뒤 0.5초 등)에 곱한다.
+        #
+        # **둘 다 실행 중에 바꿀 수 있다** — 쓰는 자리마다 다시 읽는다:
+        #   ros2 param set /coord_to_goal_node speed_scale 3.0
+        # RViz 우클릭 제어판(rviz_control_panel_node)의 "속도" 메뉴도 이 값을
+        # 바꾼다.
+        #
+        # **실물에서는 1.0으로 둘 것.** 지금 값(속도 0.2/가속 0.1)은 실물에서
+        # 정한 것이고, 올리면 그만큼 빠르게 움직인다.
+        self.declare_parameter('speed_scale', 1.0)
+        self.declare_parameter('dwell_scale', 1.0)
         self.declare_parameter('waiting_pose', 'bin')
         # [구] use_armed_pose — 2026-08-01의 되돌리기 스위치. waiting_pose가
         # 생기면서 역할이 흡수됐지만, 이 인자를 그대로 쓰는 런치/문서가 있어
@@ -1455,7 +1473,7 @@ class CoordToGoalNode(Node):
         self._awaiting_grasp_confirmation = False
         self.get_logger().info('grasp 확인됨 — 플래닝 시작')
         self._clear_timer = self.create_timer(
-            OCTOMAP_CLEAR_DELAY_SEC, self._start_planning
+            self._dwell(OCTOMAP_CLEAR_DELAY_SEC), self._start_planning
         )
         response.success = True
         response.message = '확인 완료, 플래닝 시작함'
@@ -1578,7 +1596,7 @@ class CoordToGoalNode(Node):
         # 여전히 충돌로 판정될 수 있음).
         self.get_logger().info(f'{OCTOMAP_CLEAR_DELAY_SEC}초 대기 후 플래닝 시작')
         self._clear_timer = self.create_timer(
-            OCTOMAP_CLEAR_DELAY_SEC, self._start_planning
+            self._dwell(OCTOMAP_CLEAR_DELAY_SEC), self._start_planning
         )
 
     def _allow_gripper_target_object_collision(self) -> None:
@@ -1817,6 +1835,79 @@ class CoordToGoalNode(Node):
             )
         return candidates
 
+    # 실물(RPi sync_plan)이 붙어 있는지 판정할 서비스. sync_plan만 이 이름을
+    # 제공한다(rviz_control_panel_node의 "서보 릴리즈"가 부르는 그 서비스).
+    REAL_ROBOT_MARKER_SERVICES = ('/release_servos', '/refocus_servos')
+    REAL_ROBOT_CHECK_PERIOD_SEC = 5.0
+
+    def _real_robot_connected(self) -> bool:
+        """실물 브릿지(sync_plan)가 떠 있는가.
+
+        서비스 목록 조회가 가볍지 않아 5초간 캐시한다. 못 찾으면 **안 붙은
+        것으로 본다** — 이 판정은 속도를 *올려도 되는가*에만 쓰이므로, 틀렸을
+        때 위험한 쪽(실물인데 시뮬로 오판)이 되지 않게 하려면 아래
+        _speed_scale이 이 값을 어떻게 쓰는지 같이 볼 것.
+        """
+        now = time.time()
+        cached = getattr(self, '_real_robot_cache', None)
+        if cached is not None and now - cached[0] < self.REAL_ROBOT_CHECK_PERIOD_SEC:
+            return cached[1]
+        try:
+            names = {n for n, _t in self.get_service_names_and_types()}
+            found = any(m in names for m in self.REAL_ROBOT_MARKER_SERVICES)
+        except Exception:
+            found = False
+        self._real_robot_cache = (now, found)
+        return found
+
+    def _speed_scale(self) -> float:
+        """지금 speed_scale 값. **매번 다시 읽는다** — 실행 중에
+        `ros2 param set`이나 RViz 제어판으로 바꾸면 다음 동작부터 반영된다.
+
+        **실물이 붙어 있으면 1.0으로 자른다.** 이 배수는 시뮬 전용 손잡이가
+        아니다 — 계획한 궤적의 시간축이 곧 실물 속도이기 때문이다(sync_plan은
+        /joint_states를 중계할 뿐이다). 그래서 "시뮬에서 빠르게 보려고" 올려둔
+        값이 실물 세션까지 따라오는 사고를 여기서 막는다. 실물에서도 정말
+        빠르게 하려면 VELOCITY_SCALING 상수 자체를 튜닝할 것
+        (docs/SPEED_TUNING_HANDOFF.md).
+        """
+        try:
+            scale = max(0.01, self.get_parameter('speed_scale').value or 1.0)
+        except Exception:
+            return 1.0
+        if scale > 1.0 and self._real_robot_connected():
+            if not getattr(self, '_speed_clamp_warned', False):
+                self._speed_clamp_warned = True
+                self.get_logger().warn(
+                    f'speed_scale={scale:.1f}이지만 실물(sync_plan)이 붙어 있어 '
+                    '1.0으로 자른다 — 이 배수는 시뮬 전용이 아니라 실물 속도까지 '
+                    '올린다. 실물 속도를 바꾸려면 VELOCITY_SCALING을 튜닝할 것.')
+            return 1.0
+        if scale <= 1.0:
+            self._speed_clamp_warned = False
+        return scale
+
+    def _dwell(self, seconds: float) -> float:
+        """단계 사이 정지 시간에 dwell_scale을 곱한다(최소 0.05초)."""
+        try:
+            scale = max(0.0, self.get_parameter('dwell_scale').value or 1.0)
+        except Exception:
+            scale = 1.0
+        return max(0.05, seconds * scale)
+
+    def _apply_speed(self, velocity: float, acceleration: float,
+                     label: str = '') -> None:
+        """스케일링을 speed_scale로 곱해 적용한다. 1.0을 넘지 않게 자른다 —
+        MoveIt의 scaling factor는 그 이상 의미가 없다."""
+        scale = self._speed_scale()
+        vel = min(1.0, velocity * scale)
+        acc = min(1.0, acceleration * scale)
+        self._moveit2.max_velocity = vel
+        self._moveit2.max_acceleration = acc
+        if label and abs(scale - 1.0) > 1e-6:
+            self.get_logger().info(
+                f'{label} 속도 {vel:.2f}/가속 {acc:.2f} (speed_scale {scale:.1f}배)')
+
     def _is_near_waiting_pose(self) -> bool:
         """팔이 이미 대기 자세에 있는가(경유를 건너뛰어도 되는가)."""
         current = self._get_current_arm_joint_positions()
@@ -1881,7 +1972,7 @@ class CoordToGoalNode(Node):
                 '그대로 정렬 시도.'
             )
         self._waiting_dwell_timer = self.create_timer(
-            WAITING_POSE_DWELL_SEC, self._on_waiting_dwell_done
+            self._dwell(WAITING_POSE_DWELL_SEC), self._on_waiting_dwell_done
         )
 
     def _on_waiting_dwell_done(self) -> None:
@@ -2337,7 +2428,8 @@ class CoordToGoalNode(Node):
         self.get_logger().warn(f'{reason} — 이후 단계 건너뛰고 look pose 복귀 시도.')
         self._pending_result_succeeded = False
         self._return_dwell_timer = self.create_timer(
-            RETURN_TO_LOOK_POSE_DELAY_SEC, self._start_return_to_waiting_pose
+            self._dwell(RETURN_TO_LOOK_POSE_DELAY_SEC),
+            self._start_return_to_waiting_pose
         )
 
     def _finalize_planning(self, approach_quat, candidate) -> None:
@@ -2500,8 +2592,8 @@ class CoordToGoalNode(Node):
         # SCALING 설명 참고). look pose 복귀 완료 시점(_check_return_complete)
         # 에서 정상 속도로 원상복구됨 — 이 단계가 실패해도(abort) 그 복원
         # 로직이 그대로 적용되므로 별도 처리 불필요.
-        self._moveit2.max_velocity = APPROACH_VELOCITY_SCALING
-        self._moveit2.max_acceleration = APPROACH_ACCELERATION_SCALING
+        self._apply_speed(APPROACH_VELOCITY_SCALING,
+                          APPROACH_ACCELERATION_SCALING, '[3/5 직진 접근]')
         target_position = self._pending_target_position
         self.get_logger().info(f'[3/5 직진 접근] 목표 지점으로 Cartesian 플래닝(감속 {APPROACH_VELOCITY_SCALING}): {target_position}')
         self._move_arm_cartesian(
@@ -2557,7 +2649,7 @@ class CoordToGoalNode(Node):
             f'[4/5 파지] 완료. {POST_GRASP_DWELL_SEC}초 대기 후 후퇴 시작(육안 확인용).'
         )
         self._post_grasp_dwell_timer = self.create_timer(
-            POST_GRASP_DWELL_SEC, self._start_retreat
+            self._dwell(POST_GRASP_DWELL_SEC), self._start_retreat
         )
 
     def _start_retreat(self) -> None:
@@ -2569,8 +2661,8 @@ class CoordToGoalNode(Node):
         # [so101 교훈, 위 RETREAT_VELOCITY_SCALING 설명 참고] 그리퍼가 물체를
         # 쥔 채 움직이는 구간이라 일반 속도보다 낮춤. look pose 복귀까지
         # 이 속도 유지(_check_return_complete에서 원래 속도로 복원).
-        self._moveit2.max_velocity = RETREAT_VELOCITY_SCALING
-        self._moveit2.max_acceleration = RETREAT_ACCELERATION_SCALING
+        self._apply_speed(RETREAT_VELOCITY_SCALING,
+                          RETREAT_ACCELERATION_SCALING, '[5/5 후퇴]')
 
         approach_position = self._pending_approach_position
         self.get_logger().info(f'[5/5 후퇴] 정렬 위치로 Cartesian 복귀(감속 {RETREAT_VELOCITY_SCALING}): {approach_position}')
@@ -2625,7 +2717,8 @@ class CoordToGoalNode(Node):
         # 전부 성공했다는 뜻이므로, 여기선 후퇴 결과만 반영하면 됨).
         self._pending_result_succeeded = succeeded
         self._return_dwell_timer = self.create_timer(
-            RETURN_TO_LOOK_POSE_DELAY_SEC, self._start_return_to_waiting_pose
+            self._dwell(RETURN_TO_LOOK_POSE_DELAY_SEC),
+            self._start_return_to_waiting_pose
         )
 
     def _start_return_to_waiting_pose(self) -> None:
@@ -2781,7 +2874,7 @@ class CoordToGoalNode(Node):
                 '[2/5]가 베드 위에서 열게 되므로 수동 확인 필요.'
             )
         self._bin_release_dwell_timer = self.create_timer(
-            BIN_RELEASE_DWELL_SEC, self._on_bin_release_dwell_done
+            self._dwell(BIN_RELEASE_DWELL_SEC), self._on_bin_release_dwell_done
         )
 
     def _on_bin_release_dwell_done(self) -> None:

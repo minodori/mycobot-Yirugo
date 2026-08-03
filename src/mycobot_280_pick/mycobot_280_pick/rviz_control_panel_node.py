@@ -32,6 +32,8 @@ import functools
 from interactive_markers.interactive_marker_server import InteractiveMarkerServer
 from interactive_markers.menu_handler import MenuHandler
 import rclpy
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 from visualization_msgs.msg import InteractiveMarker, InteractiveMarkerControl, Marker
@@ -47,6 +49,14 @@ EMERGENCY_STOP_SERVICE = 'emergency_stop'
 RELEASE_SERVOS_SERVICE = 'release_servos'
 REFOCUS_SERVOS_SERVICE = 'refocus_servos'
 CONFIRM_GRASP_SERVICE = 'confirm_grasp'
+# [2026-08-03] 재생 속도 조절. coord_to_goal_node의 speed_scale 파라미터를
+# 직접 바꾼다(그 노드가 쓰는 자리마다 다시 읽으므로 재시작이 필요 없다).
+#
+# **RViz의 MotionPlanning 패널에 있는 Velocity Scaling 슬라이더는 이 노드와
+# 무관하다** — 그건 그 패널이 직접 보내는 계획에만 붙는다. 우리 사이클은
+# coord_to_goal_node가 계획하므로 그쪽 파라미터를 바꿔야 한다.
+SPEED_PARAM_SERVICE = '/coord_to_goal_node/set_parameters'
+SPEED_PRESETS = (1.0, 2.0, 3.0, 5.0)
 
 
 class RvizControlPanelNode(Node):
@@ -60,6 +70,7 @@ class RvizControlPanelNode(Node):
         self._release_client = self.create_client(Trigger, RELEASE_SERVOS_SERVICE)
         self._refocus_client = self.create_client(Trigger, REFOCUS_SERVOS_SERVICE)
         self._confirm_grasp_client = self.create_client(Trigger, CONFIRM_GRASP_SERVICE)
+        self._speed_client = self.create_client(SetParameters, SPEED_PARAM_SERVICE)
 
         self._server = InteractiveMarkerServer(self, 'rviz_control_panel')
         self._menu_handler = MenuHandler()
@@ -81,6 +92,15 @@ class RvizControlPanelNode(Node):
         self._menu_handler.insert(
             'grasp 확인/실행', callback=self._on_confirm_grasp_menu
         )
+        # 속도는 하위 메뉴로 묶는다 — 최상위에 네 줄을 더하면 자주 쓰는
+        # 항목(수확 시작·정지)이 밀려 내려간다.
+        speed_menu = self._menu_handler.insert('재생 속도')
+        for preset in SPEED_PRESETS:
+            label = f'x{preset:.0f}' + (' (실물 기본)' if preset == 1.0 else '')
+            self._menu_handler.insert(
+                label, parent=speed_menu,
+                callback=functools.partial(self._on_speed_menu, preset),
+            )
 
         self._create_panel_marker()
 
@@ -89,6 +109,27 @@ class RvizControlPanelNode(Node):
             '디스플레이 추가 후 Interactive Marker Namespace를 '
             "'rviz_control_panel'로 설정하면 마커가 보임. 우클릭으로 메뉴 호출."
         )
+
+    def _on_speed_menu(self, scale, feedback) -> None:
+        """coord_to_goal_node의 speed_scale을 바꾼다.
+
+        **실물에서는 1.0으로 되돌릴 것.** 이 값은 VELOCITY_SCALING(0.2) 등
+        실물에서 튜닝한 스케일링에 그대로 곱해지고, 계획한 궤적의 시간축이
+        곧 실물 속도다(sync_plan은 /joint_states를 중계할 뿐이다).
+        """
+        if not self._speed_client.service_is_ready():
+            self.get_logger().warn(
+                f'{SPEED_PARAM_SERVICE} 없음 — coord_to_goal_node가 떠 있는지 확인할 것')
+            return
+        request = SetParameters.Request()
+        request.parameters = [Parameter(
+            name='speed_scale',
+            value=ParameterValue(type=ParameterType.PARAMETER_DOUBLE,
+                                 double_value=float(scale)))]
+        self._speed_client.call_async(request)
+        self.get_logger().info(
+            f'재생 속도 x{scale:.0f} 요청 (다음 동작부터 반영)'
+            + ('' if scale == 1.0 else ' — 실물에서는 x1로 되돌릴 것'))
 
     def _create_panel_marker(self) -> None:
         int_marker = InteractiveMarker()

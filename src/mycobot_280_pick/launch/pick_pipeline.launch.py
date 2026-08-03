@@ -81,6 +81,25 @@ def generate_launch_description():
 
     ld.add_action(
         DeclareLaunchArgument(
+            'speed_scale',
+            default_value='1.0',
+            description=(
+                '재생·실행 속도 배수. coord_to_goal_node의 속도/가속 스케일링에 '
+                '곱한다(1.0 = 지금까지의 동작). **실물에서는 1.0으로 둘 것** — '
+                '계획한 궤적의 시간축이 곧 실물 속도다. 실행 중에도 바꿀 수 있다: '
+                'ros2 param set /coord_to_goal_node speed_scale 3.0'
+            ),
+        )
+    )
+    ld.add_action(
+        DeclareLaunchArgument(
+            'dwell_scale',
+            default_value='1.0',
+            description='단계 사이 정지 시간 배수(파지 후 2초 등). 0.2면 거의 없앤다',
+        )
+    )
+    ld.add_action(
+        DeclareLaunchArgument(
             'target_source',
             default_value='yolo',
             description=(
@@ -144,7 +163,11 @@ def generate_launch_description():
             package='mycobot_280_pick',
             executable='coord_to_goal_node',
             name='coord_to_goal_node',
-            parameters=[{'waiting_pose': LaunchConfiguration('cycle')}],
+            parameters=[{
+                'waiting_pose': LaunchConfiguration('cycle'),
+                'speed_scale': LaunchConfiguration('speed_scale'),
+                'dwell_scale': LaunchConfiguration('dwell_scale'),
+            }],
         )
     )
 
