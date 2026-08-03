@@ -104,6 +104,19 @@ Visualization Manager:
         Depth: 10
         Durability Policy: Volatile
         Reliability Policy: Reliable
+    # [2026-08-03] 우클릭 제어판(rviz_control_panel_node). 이게 없으면 노드를
+    # 띄워도 **큐브가 안 보인다** — 실제로 겪었다. 네임스페이스는 그 노드가
+    # InteractiveMarkerServer에 준 이름과 같아야 한다('rviz_control_panel').
+    #
+    # 메뉴: look pose 이동 / 수확 시퀀스 시작 / 정지(소프트) / 서보 릴리즈 /
+    #       서보 재포커스 / grasp 확인 / 재생 속도 x1~x5
+    - Class: rviz_default_plugins/InteractiveMarkers
+      Name: 제어판 (우클릭)
+      Enabled: true
+      Interactive Markers Namespace: /rviz_control_panel
+      Show Axes: false
+      Show Descriptions: true
+      Show Visual Aids: false
     - Class: rviz_default_plugins/TF
       Name: TF
       Enabled: false

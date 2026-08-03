@@ -252,6 +252,26 @@ def generate_launch_description():
         )
     )
 
+    # [2026-08-03] RViz 우클릭 제어판. 터미널에 `ros2 service call`을 매번
+    # 치는 대신 마커 메뉴로 부른다(look pose 이동 / 수확 시작 / 정지 / 서보
+    # 릴리즈·재포커스 / grasp 확인 / 재생 속도). 화면에 보이려면 RViz에
+    # InteractiveMarkers 디스플레이가 있어야 하는데, config/*.rviz 셋에 다
+    # 넣어 뒀다(없으면 노드를 띄워도 큐브가 안 보인다 — 실제로 겪었다).
+    ld.add_action(
+        DeclareLaunchArgument(
+            'enable_control_panel', default_value='true',
+            description='RViz 우클릭 제어판(rviz_control_panel_node)을 같이 띄운다',
+        )
+    )
+    ld.add_action(
+        Node(
+            package='mycobot_280_pick',
+            executable='rviz_control_panel_node',
+            name='rviz_control_panel_node',
+            condition=IfCondition(LaunchConfiguration('enable_control_panel')),
+        )
+    )
+
     # ---- RViz (rviz_config를 준 경우에만) ----
     ld.add_action(
         Node(
