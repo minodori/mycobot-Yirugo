@@ -92,7 +92,9 @@ Visualization Manager:
       Topic:
         Value: /harvest_targets
         Depth: 10
-        Durability Policy: Volatile
+        # [2026-08-03] 발행자가 latched(transient local)다 — RViz를 나중에 켜도
+        # 마지막 마커를 받으려면 구독자도 같아야 한다.
+        Durability Policy: Transient Local
         Reliability Policy: Reliable
     - Class: rviz_default_plugins/TF
       Name: TF

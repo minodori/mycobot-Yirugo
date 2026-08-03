@@ -49,6 +49,7 @@ import os
 from geometry_msgs.msg import Point, PointStamped
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Bool, ColorRGBA, Float32, Float32MultiArray
@@ -143,8 +144,13 @@ class HarvestSequenceNode(Node):
         # 결과를 구로 그린다 — 스윕 화면과 같은 그림이다.
         #
         # **표시 전용이다.** collision object가 아니므로 플래닝에 영향이 없다.
+        #
+        # **latched(transient local)로 낸다** — RViz를 나중에 켜도 마지막 상태를
+        # 받아야 한다. 아니면 "마커가 안 보인다"가 되는데, 원인이 발행이 없는
+        # 것인지 놓친 것인지 화면만 봐서는 구분이 안 된다(실제로 겪었다).
         self._marker_publisher = self.create_publisher(
-            MarkerArray, 'harvest_targets', 10
+            MarkerArray, 'harvest_targets',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
         # [2026-08-02] 목표마다 그 목표의 추정 반지름을 같이 낸다
         # (_publish_next_target 참고). 예전엔 YOLO가 최적 목표 하나에 대해서만
@@ -332,18 +338,13 @@ class HarvestSequenceNode(Node):
         'done': (0.45, 0.45, 0.45, 0.45),
     }
 
-    def _publish_markers(self, current=None) -> None:
-        """큐에 들어온 목표 전체를 구로 그린다(표시 전용).
-
-        `_all_targets`는 시퀀스 시작 시점의 전체 목록이고 `_queue`는 남은 것이다.
-        둘을 비교해 이미 처리한 것과 남은 것을 색으로 나눈다 — 영상에서
-        "몇 개 중 몇 번째"가 보여야 의미가 있다.
-        """
+    def _marker_array(self, items, frame_id, current=None, remaining=None):
+        """목표 목록 -> 구 MarkerArray. 좌표계는 호출자가 정한다
+        (미리보기는 카메라 프레임, 큐는 g_base)."""
         array = MarkerArray()
-        remaining = {id(item) for item in self._queue}
-        for i, item in enumerate(self._all_targets):
+        for i, item in enumerate(items):
             m = Marker()
-            m.header.frame_id = BASE_LINK_NAME
+            m.header.frame_id = frame_id
             m.header.stamp = self.get_clock().now().to_msg()
             m.ns = 'harvest_targets'
             m.id = i
@@ -351,9 +352,9 @@ class HarvestSequenceNode(Node):
             m.action = Marker.ADD
             m.pose.position = item['point']
             m.pose.orientation.w = 1.0
-            if item is current:
+            if current is not None and item is current:
                 state = 'current'
-            elif id(item) in remaining:
+            elif remaining is None or id(item) in remaining:
                 state = 'queued'
             else:
                 state = 'done'
@@ -363,7 +364,41 @@ class HarvestSequenceNode(Node):
             cr, cg, cb, ca = self.MARKER_COLORS[state]
             m.color = ColorRGBA(r=cr, g=cg, b=cb, a=ca)
             array.markers.append(m)
+        return array
+
+    def _publish_preview_markers(self) -> None:
+        """아직 시퀀스를 안 시작했을 때, 지금 검출된 후보를 구로 그린다.
+
+        좌표를 **카메라 프레임 그대로** 쓴다 — TF는 RViz가 한다. 여기서 g_base로
+        옮기면 look pose를 벗어난 순간 좌표가 틀어지는데(그래서 시퀀스는 시작
+        시점에 한 번만 변환한다), 미리보기는 그 변환을 할 이유가 없다.
+        """
+        if not self._camera_frame_id:
+            return
+        items = [{'point': Point(x=x, y=y, z=z),
+                  'radius_m': radius_m or DEFAULT_TARGET_RADIUS_M}
+                 for _cid, x, y, z, _conf, radius_m in self._latest_candidates]
+        array = self._marker_array(items, self._camera_frame_id)
+        if not array.markers:
+            # 후보가 사라졌으면(look pose 이탈 등) 남은 구를 지운다.
+            clear = Marker()
+            clear.header.frame_id = self._camera_frame_id
+            clear.ns = 'harvest_targets'
+            clear.action = Marker.DELETEALL
+            array.markers.append(clear)
         self._marker_publisher.publish(array)
+
+    def _publish_markers(self, current=None) -> None:
+        """큐에 들어온 목표 전체를 구로 그린다(표시 전용).
+
+        `_all_targets`는 시퀀스 시작 시점의 전체 목록이고 `_queue`는 남은 것이다.
+        둘을 비교해 이미 처리한 것과 남은 것을 색으로 나눈다 — 영상에서
+        "몇 개 중 몇 번째"가 보여야 의미가 있다.
+        """
+        remaining = {id(item) for item in self._queue}
+        self._marker_publisher.publish(
+            self._marker_array(self._all_targets, BASE_LINK_NAME,
+                               current=current, remaining=remaining))
 
     def _publish_next_target(self) -> None:
         if not self._queue:
