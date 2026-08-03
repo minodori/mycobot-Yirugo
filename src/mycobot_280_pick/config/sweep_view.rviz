@@ -126,6 +126,11 @@ Visualization Manager:
     Fixed Frame: g_base
     Frame Rate: 30
   Tools:
+    # [2026-08-03] **Interact가 없으면 제어판 우클릭 메뉴가 안 열린다.**
+    # 큐브는 보이는데 메뉴만 안 나오는 증상의 원인이었다 — 대화형
+    # 마커는 이 도구가 활성일 때만 마우스 이벤트를 받는다.
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select
     - Class: rviz_default_plugins/FocusCamera
