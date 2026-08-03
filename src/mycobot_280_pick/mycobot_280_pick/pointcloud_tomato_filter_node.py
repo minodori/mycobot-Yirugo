@@ -94,6 +94,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image, JointState, PointCloud2, PointField
 from std_msgs.msg import Float32MultiArray
+from std_srvs.srv import SetBool
 
 from mycobot_280_pick import look_pose
 
@@ -189,6 +190,13 @@ class PointcloudTomatoFilterNode(Node):
         #
         # 기본은 false다. scene_replay 세션은 팔이 look pose에 없을 수도 있는데
         # 거기서 켜지면 클라우드가 아예 안 나온다.
+        # 화면 하단에서 버릴 행 수(0이면 안 자름). 카메라가 자기 그리퍼를
+        # 보는 문제 대응 — 자세한 근거는 _on_depth의 crop 주석.
+        #
+        # [2026-08-03, 실물] 480행 기준 72 = 아래 15%에서 **그리퍼 voxel이
+        # 깔끔히 사라지고 베드는 그대로 남는다**(RViz 육안 확인). 10%(48)로는
+        # 부족했다. 해상도가 바뀌면 비율로 환산해 다시 잡을 것.
+        self.declare_parameter('crop_bottom_rows', 72)
         self.declare_parameter('look_pose_gate', False)
         self.declare_parameter('look_pose_tolerance_rad', 0.08)
 
@@ -260,6 +268,25 @@ class PointcloudTomatoFilterNode(Node):
         self.create_subscription(JointState, 'joint_states',
                                  self._on_joint_states, 10)
 
+        # [2026-08-03] 수확 시퀀스 동안 클라우드 발행을 통째로 멈추는 스위치.
+        # harvest_sequence_node가 YOLO 판단 얼림(set_judgment_enabled)과 **같이**
+        # 부른다 — 얼리는 대상이 다를 뿐 목적은 같다("수확 중에는 씬을 건드리지
+        # 않는다"). 이유는 _on_depth의 주석 참고.
+        #
+        # 이름이 set_cloud_enabled(True=발행)인데 내부 플래그는 _sequence_frozen
+        # (True=정지)으로 반대인 것은, 서비스 쪽은 판단 스위치와 같은 관례를
+        # 따르고(enabled=정상) 코드 쪽은 "얼었는가"로 읽는 게 자연스러워서다.
+        #
+        # 이름 앞의 `~/`는 **필수**다. ROS 2에서 상대 이름은 노드 이름이 아니라
+        # 네임스페이스 기준으로 풀리므로, 'set_cloud_enabled'로 만들면
+        # /set_cloud_enabled가 되어 클라이언트가 찾는
+        # /pointcloud_tomato_filter_node/set_cloud_enabled와 안 맞는다
+        # (2026-08-03에 실제로 이 실수로 스위치가 조용히 건너뛰어졌다).
+        # yolo_d435_detector_node의 '~/set_judgment_enabled'와 같은 관례다.
+        self._sequence_frozen = False
+        self.create_service(SetBool, '~/set_cloud_enabled',
+                            self._on_set_cloud_enabled)
+
         self._publisher = self.create_publisher(PointCloud2, output_topic, 10)
         self._boxes_sub = self.create_subscription(
             Float32MultiArray, boxes_topic, self._on_boxes, 10
@@ -288,6 +315,29 @@ class PointcloudTomatoFilterNode(Node):
             f'{f"{publish_rate_hz:g}Hz" if self._min_publish_period_s > 0.0 else "없음"}'
             f'{", restamp_now(재생용)" if self._restamp_now else ""})'
         )
+
+    def _crop_bottom_rows(self) -> int:
+        """화면 하단에서 버릴 행 수. 파라미터를 **매번 다시 읽는다** —
+        RViz를 보며 `ros2 param set`으로 맞추는 값이라 재시작 없이 반영돼야
+        한다(look_pose_gate와 같은 이유)."""
+        try:
+            return max(0, int(self.get_parameter('crop_bottom_rows').value))
+        except Exception:
+            return 0
+
+    def _on_set_cloud_enabled(self, request, response):
+        """수확 시퀀스 동안 클라우드 발행을 멈추고/재개한다.
+
+        멈추면 octomap이 갱신되지 않으므로, 시퀀스가 시작 직후 부른
+        /clear_octomap 상태(빈 씬)가 시퀀스 내내 유지된다. 계획과 실행이
+        같은 씬을 보게 되는 것이 목적이다.
+        """
+        self._sequence_frozen = not request.data
+        response.success = True
+        response.message = ('클라우드 발행 재개' if request.data
+                            else '클라우드 발행 정지 — 수확 중 씬 고정')
+        self.get_logger().info(response.message)
+        return response
 
     def _gate_enabled(self) -> bool:
         """look_pose_gate 파라미터를 **매번 다시 읽는다** — 실행 중에
@@ -325,6 +375,24 @@ class PointcloudTomatoFilterNode(Node):
 
     def _on_depth(self, depth_msg: Image) -> None:
         if self._intrinsics is None:
+            return
+
+        # [2026-08-03, 실물] 수확 시퀀스가 도는 동안은 아예 발행하지 않는다.
+        #
+        # look_pose_gate만으로는 부족하다는 것이 실물에서 확인됐다. 게이트는
+        # "look pose에 있을 때만 낸다"인데 [0/5] 경유가 **바로 그 look pose에서
+        # 출발**하므로, 출발 시점의 씬이 계속 갱신된다. /clear_octomap을 사이클
+        # 시작으로 옮겨도 소용없었다 — 클리어 1.2초 뒤 플래닝인데 그 사이
+        # (센서 1Hz) 한 프레임이 들어와 joint3/joint4를 덮었다. 계획이 통과해도
+        # 실행 중에 "path became invalid (environment changed)"로 깨졌다.
+        #
+        # 성공했던 실행들은 타이밍이 맞았을 뿐이고 재현성이 없었다. 씬을 아예
+        # 고정해야 계획도 실행도 같은 세계를 본다.
+        #
+        # 대가: 수확 중에는 장애물(줄기·지지대) 회피가 없다. 이건 핸드오프
+        # 5절 5번("octomap 회피를 켤 것인가")의 실측 근거 위에서 내린 선택이다 —
+        # 회피를 켠 상태의 성공률이 100 -> 77%였고, 오늘 실패는 전부 여기서 나왔다.
+        if self._sequence_frozen:
             return
 
         # look pose 게이트(위 파라미터 설명). 역투영 **앞에서** 잘라야 CPU도
@@ -366,6 +434,32 @@ class PointcloudTomatoFilterNode(Node):
         xs[invalid] = math.nan
         ys[invalid] = math.nan
         zs[invalid] = math.nan
+
+        # [2026-08-03] 화면 아래쪽 잘라내기 — 카메라가 **자기 그리퍼**를 본다.
+        #
+        # eye-in-hand라 그리퍼 끝이 화면 하단에 걸린다. 그게 octomap voxel이
+        # 되어 팔 자신과 충돌 판정되고, 긴 전이가 죽는다. self-filter의
+        # padding으로 덮으려 했으나 실패했다 — padding_scale은 비례라 얇은
+        # 손가락은 안 덮이고 큰 링크만 부풀어 실제 물체가 지워졌고,
+        # padding_offset(절대값)은 베드 전체를 지워버렸다(sensors_3d.yaml 주석).
+        # 안 보이게 만드는 쪽이 지우려 애쓰는 쪽보다 확실하다.
+        #
+        # **핸드아이 캘리브레이션은 다시 안 해도 된다.** 픽셀을 버리는 것은
+        # joint6 -> camera_link 변환을 안 건드린다. 다만 이미지 **크기를 줄이면
+        # 안 된다** — 주점(cx, cy)이 이동해 역투영이 틀어진다. 그래서 원본
+        # 크기를 유지한 채 해당 행만 NaN으로 만든다(픽셀 좌표가 그대로 유지됨).
+        #
+        # YOLO 검출에는 영향이 없다 — 이 노드는 octomap용 클라우드만 만들고,
+        # yolo_d435_detector_node는 컬러/depth 원본을 따로 본다.
+        #
+        # 값은 RViz로 보며 맞출 것(실행 중 ros2 param set으로 조정 가능):
+        #   그리퍼가 voxel에서 사라지는 최소값을 쓴다. 크게 잡을수록 베드
+        #   아래쪽의 진짜 장애물(줄기 밑동)도 같이 사라진다.
+        crop = self._crop_bottom_rows()
+        if crop > 0:
+            xs[height - crop:, :] = math.nan
+            ys[height - crop:, :] = math.nan
+            zs[height - crop:, :] = math.nan
 
         for x1, y1, x2, y2 in self._boxes:
             pad_x = (x2 - x1) * self._bbox_padding_ratio

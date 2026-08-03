@@ -656,7 +656,35 @@ class Slider_Subscriber(Node):
                         data_list, speed, delta_max, elapsed, delta_max / elapsed
                     )
                 )
-            self.mc.send_angles(data_list, speed, _async=True)
+            # [2026-08-03] **첫 전송만 동기로 보낸다.**
+            #
+            # 실물에서 "sync_plan을 켜면 팔이 기립한다"가 매번 재현됐다. 오늘
+            # 분리 시험으로 좁힌 결과:
+            #   send_angles(_async=True) 단독      -> 정상(look pose로 제대로 감)
+            #   set_gripper_state 단독             -> -1 반환, 팔은 안 움직임
+            #   sync_plan(둘 다 + LED)             -> 기립
+            # 즉 개별 명령이 아니라 **혼재**가 문제다. 기동 직후 순서를 보면
+            #   get_fresh_mode() / get_angles()  <- 동기 읽기, 응답 바이트가 온다
+            #   send_angles(_async=True)         <- 쓰기 전용, 입력 버퍼를 **안 비운다**
+            # 이 파일 위쪽 주석이 이미 경고한 그대로다("async 경로는 _res가 매
+            # 호출 하던 reset_input_buffer()를 건너뛴다 ... 이상 동작이 보이면
+            # 입력 버퍼 적체를 의심할 것"). 남은 응답 바이트 위에 첫 프레임을
+            # 얹으면 펌웨어가 프레임 경계를 잘못 잡을 수 있다.
+            #
+            # 동기 경로(_res)는 호출마다 reset_input_buffer()를 하므로, 첫 한
+            # 번만 동기로 보내면 버퍼가 정리된 상태에서 시작한다. 비용은 첫
+            # 명령 1회의 블로킹(~1.5초)뿐이고, 이후 스트리밍은 async 그대로다.
+            #
+            # 왜 "첫 전송"이 결정적인가: 시뮬이 look pose에서 안 움직이면
+            # 아래 should_send가 계속 False라 **두 번째 명령이 영영 안 나간다.**
+            # 그래서 첫 프레임이 어긋나면 팔이 그 자세로 굳는다(스스로 복구 안 됨).
+            first_send = self._last_sent_angles is None
+            if first_send:
+                self.get_logger().info(
+                    '첫 전송 — 동기 경로로 보낸다(입력 버퍼 정리 목적, 위 주석 참고).')
+                self.mc.send_angles(data_list, speed)
+            else:
+                self.mc.send_angles(data_list, speed, _async=True)
             self._last_sent_angles = data_list
             self._last_sent_time = now
             self._last_sent_speed = speed

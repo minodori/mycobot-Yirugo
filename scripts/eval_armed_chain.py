@@ -113,7 +113,11 @@ def state_valid(node, joints):
 # 수확통 놓는 지점 — docs/ARMED_POSE_HANDOFF.md 4절 확정값.
 # 통 y=+0.15, 림 z=0.100, 놓는 지점(그리퍼 끝단) z=0.130. flange는 그보다
 # 그리퍼 길이만큼 위. 목표 제약은 위치 6x6cm 상자 + yaw 자유(같은 절).
-BIN_FLANGE = (0.0, 0.15, 0.130 + N.GRIPPER_LENGTH_OFFSET_M)
+# [2026-08-03] 그리퍼 길이를 GRIPPER_LENGTH_OFFSET_M(0.09, 열린 상태 파지점)으로
+# 잡고 있었는데, 통에 올 때 그리퍼는 열매를 쥐고 **닫혀** 있다(끝단 0.11).
+# 이 20mm를 빼먹으면 flange가 20mm 낮게 잡혀 실제 놓는 높이가 림 위 29mm가
+# 아니라 9mm가 된다 — 4절이 "림 위 1cm면 12회 중 5회 실패"로 배제한 구간이다.
+BIN_FLANGE = (0.0, 0.15, 0.130 + N.GRIPPER_TIP_CLOSED_M)
 BIN_BOX = [0.06, 0.06, 0.04]
 
 

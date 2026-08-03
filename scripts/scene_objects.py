@@ -285,13 +285,18 @@ def fetch_acm(node):
     return fut.result().scene.allowed_collision_matrix
 
 
-def tip_clearance(pos, quat, dets):
+def tip_clearance(pos, quat, dets, tip_len=None):
     """그리퍼 끝단에서 가장 가까운 토마토까지 거리(m).
 
-    끝단 = flange에서 그리퍼 정면(로컬 +Z) 방향으로 GRIPPER_LENGTH_OFFSET_M.
+    끝단 = flange에서 그리퍼 정면(로컬 +Z) 방향으로 tip_len.
     쿼터니언에서 정면 축을 뽑아 쓴다(회전행렬 3번째 열).
+
+    [2026-08-03] 기본값이 GRIPPER_LENGTH_OFFSET_M(0.09)이었는데 그건 **열린
+    상태의 파지점**이라 끝단 위치로 쓰면 20mm 짧다. 여유 계산은 보수적인 쪽
+    (닫힌 상태 0.11, 끝단이 가장 멀리 뻗은 상태)을 써야 한다 — 이 함수를 쓰는
+    자세 도출은 전부 열매를 쥔 채 지나가는 구간이다.
     """
     x, y, z, w = quat
     fz = (2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y))
-    tip = tuple(p + N.GRIPPER_LENGTH_OFFSET_M * f for p, f in zip(pos, fz))
+    tip = tuple(p + (tip_len or N.GRIPPER_TIP_CLOSED_M) * f for p, f in zip(pos, fz))
     return min(math.dist(tip, (d['base_x'], d['base_y'], d['base_z'])) for d in dets)

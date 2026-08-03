@@ -437,6 +437,10 @@ class YoloD435DetectorNode(Node):
         self._at_look_pose = False
         self._judgment_locked = False
         self._accumulated_detections = []  # [(class_id, x, y, z, confidence), ...]
+        # 마지막 판단의 클러스터 목록. 주석 이미지에 번호를 얹는 데 쓴다
+        # (_publish_annotated_image 주석 참고). 인덱스는 tomato_candidates
+        # 발행 순서와 같다 — RViz 마커 번호와 화면 번호를 맞추기 위함이다.
+        self._last_clusters = []
         self._accumulation_timer = None
         # [2026-08-02] 판단 전체를 외부에서 얼릴 수 있게 한다(set_judgment_enabled).
         # 수확 시퀀스가 도는 동안 harvest_sequence_node가 이걸 내린다 — 시퀀스는
@@ -585,6 +589,10 @@ class YoloD435DetectorNode(Node):
             f'누적 종료 — 검출 {len(self._accumulated_detections)}개 -> '
             f'클러스터 {len(clusters)}개로 판단'
         )
+        # 주석 이미지에 번호를 얹으려면 판단 결과를 들고 있어야 한다
+        # (_publish_annotated_image 주석 참고). 발행 **전에** 넣어 두어야
+        # 그 직후 프레임부터 번호가 보인다.
+        self._last_clusters = list(clusters)
         self._publish_candidates(clusters)
         self._publish_best_target(clusters)
 
@@ -709,6 +717,35 @@ class YoloD435DetectorNode(Node):
 
     def _publish_annotated_image(self, result, header) -> None:
         annotated = result.plot()  # bbox/클래스명/confidence가 그려진 BGR 이미지
+
+        # [2026-08-03, 실물] 마지막 판단의 **클러스터 번호**를 화면에 얹는다.
+        #
+        # RViz의 목표 구에는 번호가 있는데 카메라 화면에는 없어서, "RViz의 #3이
+        # 화면의 어느 열매인가"를 분포로 눈짐작해야 했다. 열매가 15개씩 몰려
+        # 있으면 그 짐작이 안 된다 — 그래서 어느 열매를 겨냥했는지 모른 채
+        # 상하좌우 오차를 재려 하고 있었다.
+        #
+        # 번호는 `tomato_candidates` 발행 순서와 **같은 인덱스**다. 그 순서를
+        # harvest_sequence_node의 미리보기 마커도 그대로 쓰므로, 화면의 #N과
+        # RViz의 #N이 같은 열매를 가리킨다.
+        #
+        # 판단은 look pose에서 1회만 도는데 이 함수는 매 프레임 불리므로,
+        # 마지막 판단 결과를 들고 있다가 계속 다시 그린다(팔이 움직여 화면이
+        # 바뀌면 위치는 어긋나지만, 판단 직후 look pose에서 보는 것이 목적이다).
+        if self._last_clusters and self._intrinsics is not None:
+            fx, fy, cx, cy = self._intrinsics
+            for i, c in enumerate(self._last_clusters, 1):
+                if c['z'] <= 0.0:
+                    continue
+                u = int(round(fx * c['x'] / c['z'] + cx))
+                v = int(round(fy * c['y'] / c['z'] + cy))
+                cv2.circle(annotated, (u, v), 11, (0, 255, 255), -1)
+                cv2.circle(annotated, (u, v), 11, (0, 0, 0), 2)
+                cv2.putText(annotated, str(i),
+                            (u - 5 if i < 10 else u - 10, v + 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1,
+                            cv2.LINE_AA)
+
         image_msg = self._bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
         image_msg.header = header
         self._annotated_image_publisher.publish(image_msg)

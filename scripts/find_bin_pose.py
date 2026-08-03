@@ -69,10 +69,15 @@ DOWN_QUAT = N._compute_look_at_quat_xyzw((0.0, 0.0, -1.0))
 
 
 def tip_from_joints(pos7):
-    """FK 결과(flange 위치+자세) -> 그리퍼 끝단 위치와 정면 단위벡터."""
+    """FK 결과(flange 위치+자세) -> 그리퍼 끝단 위치와 정면 단위벡터.
+
+    [2026-08-03] 닫힌 상태 끝단(0.11)을 쓴다 — 통 자세에 올 때 그리퍼는 열매를
+    쥐고 닫혀 있다. 0.09(열린 상태 파지점)로 뽑은 이전 해는 끝단 높이를 20mm
+    과대평가했다.
+    """
     x, y, z, w = pos7[3:]
     fz = (2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y))
-    tip = tuple(p + N.GRIPPER_LENGTH_OFFSET_M * f for p, f in zip(pos7[:3], fz))
+    tip = tuple(p + N.GRIPPER_TIP_CLOSED_M * f for p, f in zip(pos7[:3], fz))
     return tip, fz
 
 
@@ -207,7 +212,10 @@ def main():
         # 통 입구 안인가 — 상자 절반 + 여유로 판정
         in_box = (abs(tip[0] - BIN_FLANGE[0]) <= BIN_BOX[0] / 2 + 0.005 and
                   abs(tip[1] - BIN_FLANGE[1]) <= BIN_BOX[1] / 2 + 0.005 and
-                  abs(tip[2] - (BIN_FLANGE[2] - N.GRIPPER_LENGTH_OFFSET_M))
+                  # BIN_FLANGE[2] = 놓는 지점 + 닫힌 그리퍼 길이이므로 같은
+                  # 값을 빼야 놓는 지점(0.130)이 나온다. 0.09를 빼면 0.150이
+                  # 되어 판정 기준이 20mm 위로 밀린다. [2026-08-03]
+                  abs(tip[2] - (BIN_FLANGE[2] - N.GRIPPER_TIP_CLOSED_M))
                   <= BIN_BOX[2] / 2 + 0.005)
         c.update(fk=pos7, tip=tip, down_deg=down_deg, clearance=clr,
                  valid=valid, hits_links=hits, in_box=in_box)

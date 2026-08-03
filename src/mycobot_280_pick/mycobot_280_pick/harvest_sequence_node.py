@@ -120,6 +120,10 @@ class HarvestSequenceNode(Node):
         self._waiting_for_result = False
         self._next_target_timer = None
         self._all_targets = []
+        # 목표 인덱스 -> 시도 횟수. RViz 라벨(#N:tryM)에 쓴다. 파일 목표로
+        # 같은 열매를 값만 바꿔가며 반복 시도하는 방식이라, 시퀀스를 다시
+        # 시작해도 **누적**된다(노드 재시작 시에만 0으로).
+        self._attempts = {}
 
         self.create_subscription(
             CameraInfo, DEFAULT_CAMERA_INFO_TOPIC, self._on_camera_info, 10
@@ -181,6 +185,17 @@ class HarvestSequenceNode(Node):
             SetBool, '/yolo_d435_detector_node/set_judgment_enabled'
         )
 
+        # [2026-08-03, 실물] 시퀀스 동안 **포인트클라우드 발행도** 멈춘다.
+        #
+        # 판단 얼림이 "수확 중에 목표를 바꾸지 마라"였다면, 이쪽은 "수확 중에
+        # 씬을 바꾸지 마라"다. 실물에서 octomap이 계획 중·실행 중에 갱신되어
+        # [0/5] 경유가 joint3/joint4 충돌로 죽고, 계획이 통과해도 실행 중
+        # "path became invalid"로 깨졌다. 클리어 시점을 앞으로 옮겨도 센서
+        # 1Hz 한 프레임이면 다시 덮였다. 자세한 근거는 필터 노드 _on_depth 주석.
+        self._cloud_client = self.create_client(
+            SetBool, '/pointcloud_tomato_filter_node/set_cloud_enabled'
+        )
+
         self.get_logger().info(
             'harvest_sequence_node 준비 완료. /start_harvest_sequence 서비스 대기 중 '
             '(팔이 look pose에서 대상을 보고 있는 상태에서 호출할 것).'
@@ -203,6 +218,19 @@ class HarvestSequenceNode(Node):
             parsed.append((int(class_id), x, y, z, confidence, radius_m))
         self._latest_candidates = parsed
 
+        # [2026-08-03, 실물] 여기서 미리보기 마커를 낸다.
+        #
+        # `_publish_preview_markers`는 정의만 되어 있고 **어디서도 불리지 않는
+        # 죽은 코드**였다. 그래서 시퀀스를 시작하기 전에는 RViz에 목표 구가
+        # 아예 안 떴고, "카메라 화면의 몇 번이 RViz의 어느 구인가"를 대조할
+        # 방법이 없었다(오늘 실물에서 이것 때문에 어느 열매를 겨냥했는지 모른
+        # 채 상하좌우 오차를 재려 했다).
+        #
+        # 시퀀스가 도는 중에는 내지 않는다 — 그때는 `_publish_markers`가 큐
+        # 기준으로 같은 토픽에 그리고 있어서, 여기서 또 내면 서로 덮어쓴다.
+        if not self._queue and not self._waiting_for_result:
+            self._publish_preview_markers()
+
     def _on_start_harvest(self, request, response) -> Trigger.Response:
         if self._waiting_for_result or self._queue:
             response.success = False
@@ -223,6 +251,9 @@ class HarvestSequenceNode(Node):
         self._publish_markers()
         # 시퀀스가 도는 동안 YOLO 판단을 얼린다(그 클라이언트 주석 참고).
         self._set_judgment(False)
+        # 같은 이유로 클라우드 발행도 멈춘다 — 목표뿐 아니라 **씬**도 고정해야
+        # 계획과 실행이 같은 세계를 본다(_set_cloud 주석 참고).
+        self._set_cloud(False)
 
         order = ('카메라 깊이 오름차순' if self._target_source == 'yolo'
                  else self._file_order_label)
@@ -364,6 +395,32 @@ class HarvestSequenceNode(Node):
             cr, cg, cb, ca = self.MARKER_COLORS[state]
             m.color = ColorRGBA(r=cr, g=cg, b=cb, a=ca)
             array.markers.append(m)
+
+            # [2026-08-03] 목표 위에 **번호와 시도 횟수**를 띄운다.
+            #
+            # 실물에서 같은 목표를 값만 바꿔가며 여러 번 돌리는데(오늘
+            # GRIPPER_LENGTH_OFFSET_M을 0.09 -> 0.11 -> 0.12로 옮겼다), 화면만
+            # 봐서는 지금이 몇 번째 시도인지, 어느 열매를 이미 건드렸는지
+            # 알 수가 없었다. 눈으로 대조할 수 있어야 "이 값에서 이 열매가
+            # 어땠는지"를 기록할 수 있다.
+            #
+            # 라벨에 한글과 공백을 쓰지 않는 이유는 show_detections.py와 같다
+            # (함정 14 — 폰트 아틀라스에 없어서 안 보이거나 간격이 벌어진다).
+            t = Marker()
+            t.header.frame_id = frame_id
+            t.header.stamp = m.header.stamp
+            t.ns = 'harvest_target_labels'
+            t.id = i
+            t.type = Marker.TEXT_VIEW_FACING
+            t.action = Marker.ADD
+            t.pose.position.x = item['point'].x
+            t.pose.position.y = item['point'].y
+            t.pose.position.z = item['point'].z + r + 0.03
+            t.pose.orientation.w = 1.0
+            t.scale.z = 0.025
+            t.color = ColorRGBA(r=cr, g=cg, b=cb, a=1.0)
+            t.text = f'#{i + 1}:try{self._attempts.get(i, 0)}'
+            array.markers.append(t)
         return array
 
     def _publish_preview_markers(self) -> None:
@@ -408,6 +465,17 @@ class HarvestSequenceNode(Node):
 
         item = self._queue.pop(0)
         point = item['point']
+        # 이 목표의 시도 횟수를 올린다(라벨 #N:tryM용). `_all_targets` 안의
+        # 위치를 키로 쓰므로 **같은 파일로 다시 돌리면 누적**된다 — 값을
+        # 바꿔가며 같은 열매를 반복 시도하는 지금 방식에 맞춘 것이다.
+        # 노드를 재시작하면 0부터다.
+        try:
+            idx = self._all_targets.index(item)
+            self._attempts[idx] = self._attempts.get(idx, 0) + 1
+            self.get_logger().info(
+                f'목표 #{idx + 1} 시도 {self._attempts[idx]}회째')
+        except ValueError:
+            pass
         self._publish_markers(current=item)
 
         # [2026-08-02] **반지름을 목표보다 먼저 발행한다.**
@@ -450,6 +518,25 @@ class HarvestSequenceNode(Node):
         self.get_logger().info(
             f'YOLO 판단 {"해제" if enabled else "얼림"} 요청.')
 
+    def _set_cloud(self, enabled: bool) -> None:
+        """포인트클라우드 발행을 켜고 끈다(= octomap 갱신을 켜고 끈다).
+
+        판단 스위치와 같은 이유로, 서비스가 없으면 경고만 하고 진행한다 —
+        필터 노드 없이 도는 세션이 있다. 다만 그 경우 수확 중 씬이 계속
+        갱신되므로, 경고 문구에 그 결과를 적어 둔다.
+        """
+        if not self._cloud_client.service_is_ready():
+            self.get_logger().warn(
+                '클라우드 스위치(set_cloud_enabled)가 없어 건너뜀 — 수확 중에도 '
+                'octomap이 갱신되어 긴 전이가 충돌/무효화로 실패할 수 있다.'
+            )
+            return
+        request = SetBool.Request()
+        request.data = enabled
+        self._cloud_client.call_async(request)
+        self.get_logger().info(
+            f'클라우드 발행 {"재개" if enabled else "정지(씬 고정)"} 요청.')
+
     def _return_to_look_pose(self) -> None:
         """[2026-08-01] 시퀀스가 끝나면 look pose로 한 번 돌아간다.
 
@@ -474,6 +561,9 @@ class HarvestSequenceNode(Node):
         # 누적이 시작되도록. 먼저 풀어도 결과는 같지만(누적 시작점은 도착
         # 시점이다) 순서를 이렇게 두면 로그가 사이클 순서대로 읽힌다.
         self._set_judgment(True)
+        # 클라우드도 같이 재개한다 — look pose로 돌아가면 다시 씬을 봐야 한다.
+        # 판단보다 뒤에 두는 이유는 없다(둘 다 비동기 호출이고 순서 무관).
+        self._set_cloud(True)
 
     def _on_plan_result(self, msg: Bool) -> None:
         if not self._waiting_for_result:

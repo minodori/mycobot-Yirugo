@@ -71,7 +71,9 @@ BIN_BOX_XYZ = [BIN_INNER_M - 2 * BIN_MARGIN_M,
 ARMED_POSE_DEG = [27.08, -2.39, -63.53, 1.70, -80.44, 64.83]
 
 # 그리퍼 길이 — flange는 놓는 지점보다 이만큼 위에 있어야 한다.
-GRIPPER_LEN_M = N.GRIPPER_LENGTH_OFFSET_M
+# [2026-08-03] 통에 올 때는 열매를 쥔 **닫힌** 상태이므로 끝단이 0.11까지
+# 뻗는다(0.09는 열린 상태 파지점이라 여기 쓰면 20mm 과대평가).
+GRIPPER_LEN_M = N.GRIPPER_TIP_CLOSED_M
 
 
 def publish_bin_collision(node, y, remove=False):
