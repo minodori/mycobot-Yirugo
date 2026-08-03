@@ -328,7 +328,37 @@ x1/x2/x3/x5`가 있다. (RViz **MotionPlanning 패널**의 Velocity Scaling 슬�
 
 ---
 
-## 4.3 수확 중 화면이 요동칠 때 (장면 고정)
+## 4.3 실물 세션 화면 구성
+
+**RViz 설정을 따로 뒀다** — 실물 수확을 볼 때는 이걸 쓴다:
+
+```bash
+rviz2 -d src/mycobot_280_pick/config/harvest_view.rviz
+```
+
+| 보이는 것 | 무엇 |
+|---|---|
+| RobotModel | 팔 |
+| PlanningScene | octomap voxel + 지금 목표 구(`target_object`) |
+| MarkerArray `/harvest_targets` | **검출된 열매 전체를 구로** — 대기=빨강, 지금 목표=노랑(1.6배), 끝난 것=회색 |
+
+**PointCloud2는 일부러 안 넣었다.** 실물 영상을 화면에 깔면 팔·구·voxel을 가려서
+오히려 읽기 어렵다(2026-08-03 확인). 그래서 검출 결과를 **구로** 그린다 —
+`harvest_sequence_node`가 큐 전체를 `/harvest_targets`에 낸다(**표시 전용**이라
+플래닝에는 영향이 없다).
+
+실물 영상을 굳이 보고 싶으면 마스킹 안 한 클라우드를 따로 켤 수 있다(기본 꺼짐):
+
+```bash
+ros2 launch mycobot_280_pick pick_pipeline.launch.py cycle:=bsc \
+    enable_unmasked_cloud:=true
+# RViz에서 Add > PointCloud2 > /camera/camera/depth/color/points_unmasked
+```
+
+> 왜 octomap에는 열매가 안 보이나 — 필터가 bbox로 **일부러 지운다**. 안 그러면
+> 따려는 열매 자신이 장애물이 되어 접근이 막힌다(핸드오프 함정 11).
+
+## 4.4 수확 중 화면이 요동칠 때 (장면 고정)
 
 카메라가 **eye-in-hand**(joint6)라 팔이 움직이는 동안에도 클라우드를 계속 내면
 `occupancy_map_monitor`가 그때그때 본 것을 합치고 시야를 따라 지운다. 수확 중

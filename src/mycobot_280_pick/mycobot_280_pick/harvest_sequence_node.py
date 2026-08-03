@@ -51,10 +51,11 @@ import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo
-from std_msgs.msg import Bool, Float32, Float32MultiArray
+from std_msgs.msg import Bool, ColorRGBA, Float32, Float32MultiArray
 from std_srvs.srv import SetBool, Trigger
 from tf2_geometry_msgs import do_transform_point
 import tf2_ros
+from visualization_msgs.msg import Marker, MarkerArray
 
 BASE_LINK_NAME = 'g_base'
 DEFAULT_CAMERA_INFO_TOPIC = '/camera/camera/aligned_depth_to_color/camera_info'
@@ -117,6 +118,7 @@ class HarvestSequenceNode(Node):
         self._queue = []  # [(Point(g_base), class_id, confidence, original_depth), ...]
         self._waiting_for_result = False
         self._next_target_timer = None
+        self._all_targets = []
 
         self.create_subscription(
             CameraInfo, DEFAULT_CAMERA_INFO_TOPIC, self._on_camera_info, 10
@@ -127,6 +129,22 @@ class HarvestSequenceNode(Node):
         self.create_subscription(Bool, 'plan_result', self._on_plan_result, 10)
         self._target_publisher = self.create_publisher(
             PointStamped, 'target_point', 10
+        )
+        # [2026-08-03] 큐에 든 목표를 **구 마커**로 그린다.
+        #
+        # 왜 필요한가: 실물 세션의 RViz에는 지금 무엇이 "토마토"인지 보여주는
+        # 것이 없다. octomap은 열매를 일부러 지우고(따려는 열매 자신이 장애물이
+        # 되면 안 되므로 — 핸드오프 함정 11) coord_to_goal_node가 씬에 넣는
+        # 구는 **지금 목표 하나**(target_object)뿐이다. 그래서 화면에서 열매
+        # 자리가 통째로 비어 보인다.
+        #
+        # 마스킹 안 한 포인트클라우드를 깔아 보는 방법도 있는데(실물 영상),
+        # 팔·구·voxel을 오히려 가려서 안 쓰기로 했다(2026-08-03). 대신 검출
+        # 결과를 구로 그린다 — 스윕 화면과 같은 그림이다.
+        #
+        # **표시 전용이다.** collision object가 아니므로 플래닝에 영향이 없다.
+        self._marker_publisher = self.create_publisher(
+            MarkerArray, 'harvest_targets', 10
         )
         # [2026-08-02] 목표마다 그 목표의 추정 반지름을 같이 낸다
         # (_publish_next_target 참고). 예전엔 YOLO가 최적 목표 하나에 대해서만
@@ -195,6 +213,8 @@ class HarvestSequenceNode(Node):
             return response
 
         self._queue = queue
+        self._all_targets = list(queue)      # 마커용 원본(처리해도 안 지운다)
+        self._publish_markers()
         # 시퀀스가 도는 동안 YOLO 판단을 얼린다(그 클라이언트 주석 참고).
         self._set_judgment(False)
 
@@ -305,6 +325,46 @@ class HarvestSequenceNode(Node):
             f'({self._file_order_label}).')
         return queue, None
 
+    # 마커 색: 대기=빨강, 지금 목표=노랑(크게), 끝난 것=회색.
+    MARKER_COLORS = {
+        'queued': (0.85, 0.15, 0.15, 0.75),
+        'current': (1.00, 0.85, 0.10, 1.00),
+        'done': (0.45, 0.45, 0.45, 0.45),
+    }
+
+    def _publish_markers(self, current=None) -> None:
+        """큐에 들어온 목표 전체를 구로 그린다(표시 전용).
+
+        `_all_targets`는 시퀀스 시작 시점의 전체 목록이고 `_queue`는 남은 것이다.
+        둘을 비교해 이미 처리한 것과 남은 것을 색으로 나눈다 — 영상에서
+        "몇 개 중 몇 번째"가 보여야 의미가 있다.
+        """
+        array = MarkerArray()
+        remaining = {id(item) for item in self._queue}
+        for i, item in enumerate(self._all_targets):
+            m = Marker()
+            m.header.frame_id = BASE_LINK_NAME
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.ns = 'harvest_targets'
+            m.id = i
+            m.type = Marker.SPHERE
+            m.action = Marker.ADD
+            m.pose.position = item['point']
+            m.pose.orientation.w = 1.0
+            if item is current:
+                state = 'current'
+            elif id(item) in remaining:
+                state = 'queued'
+            else:
+                state = 'done'
+            r = float(item['radius_m'])
+            scale = 2.0 * r * (1.6 if state == 'current' else 1.0)
+            m.scale.x = m.scale.y = m.scale.z = scale
+            cr, cg, cb, ca = self.MARKER_COLORS[state]
+            m.color = ColorRGBA(r=cr, g=cg, b=cb, a=ca)
+            array.markers.append(m)
+        self._marker_publisher.publish(array)
+
     def _publish_next_target(self) -> None:
         if not self._queue:
             self.get_logger().info('수확 시퀀스 완료 — 큐 비어있음.')
@@ -313,6 +373,7 @@ class HarvestSequenceNode(Node):
 
         item = self._queue.pop(0)
         point = item['point']
+        self._publish_markers(current=item)
 
         # [2026-08-02] **반지름을 목표보다 먼저 발행한다.**
         # coord_to_goal_node는 target_point를 받는 순간의 캐시값을 그 사이클용으로

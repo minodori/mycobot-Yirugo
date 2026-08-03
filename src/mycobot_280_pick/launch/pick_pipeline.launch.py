@@ -83,11 +83,13 @@ def generate_launch_description():
     ld.add_action(
         DeclareLaunchArgument(
             'enable_unmasked_cloud',
-            default_value='true',
+            default_value='false',
             description=(
-                'RViz에서 **실제 토마토가 보이게** 마스킹 안 한 클라우드를 따로 '
-                '발행한다(/camera/camera/depth/color/points_unmasked, 2Hz). '
-                'octomap에는 안 들어간다 — 순수 육안 확인용. CPU가 아까우면 false.'
+                '마스킹 안 한 클라우드를 따로 발행한다'
+                '(/camera/camera/depth/color/points_unmasked, 2Hz, octomap에는 '
+                '안 들어감). **기본은 꺼짐** — 실물 영상이 화면에 깔리면 팔·구·'
+                'voxel을 읽기 어렵다는 판단(2026-08-03). 검출된 열매는 대신 '
+                'harvest_sequence_node가 /harvest_targets에 구로 그린다.'
             ),
         )
     )
