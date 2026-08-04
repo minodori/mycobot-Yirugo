@@ -1,0 +1,35 @@
+{
+ "frame": "g_base",
+ "detections": [
+  {
+   "class_id": 0,
+   "class_name": "ripe",
+   "camera_x": -0.0393,
+   "camera_y": -0.0687,
+   "camera_z": 0.4275,
+   "base_x": 0.2544,
+   "base_y": 0.0677,
+   "base_z": 0.3506,
+   "base_radius": 0.2633,
+   "base_azimuth_deg": 14.9,
+   "radius_m": 0.0174,
+   "confidence": 0.8013,
+   "count": 36
+  },
+  {
+   "class_id": 0,
+   "class_name": "ripe",
+   "camera_x": 0.008,
+   "camera_y": -0.0293,
+   "camera_z": 0.4288,
+   "base_x": 0.2564,
+   "base_y": 0.0213,
+   "base_z": 0.3101,
+   "base_radius": 0.2573,
+   "base_azimuth_deg": 4.75,
+   "radius_m": 0.0176,
+   "confidence": 0.6394,
+   "count": 36
+  }
+ ]
+}

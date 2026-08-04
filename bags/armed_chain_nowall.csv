@@ -1,0 +1,5 @@
+method,transit_deg,n_targets,octomap_acm
+A  현재(단일 armed),12203.3,15,True
+B1 타겟별(규칙),12006.9,15,True
+C  armed 없음,6696.1,15,True
+B2 타겟별(그리디),12175.5,15,True

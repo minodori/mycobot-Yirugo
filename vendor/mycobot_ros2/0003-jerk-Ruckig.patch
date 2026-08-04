@@ -1,0 +1,171 @@
+From e3140b3cb63f7f6598405ecf59a189cbb53eee68 Mon Sep 17 00:00:00 2001
+From: minodori <minodori@gmail.com>
+Date: Thu, 30 Jul 2026 11:49:45 +0900
+Subject: [PATCH 3/3] =?UTF-8?q?jerk=20=EC=A0=9C=ED=95=9C=20=EC=8A=A4?=
+ =?UTF-8?q?=EB=AC=B4=EB=94=A9(Ruckig)=20=ED=99=9C=EC=84=B1=ED=99=94=20?=
+ =?UTF-8?q?=E2=80=94=20=EC=8B=A4=EB=AC=BC=20=EB=96=A8=EB=A6=BC=20=EC=99=84?=
+ =?UTF-8?q?=ED=99=94?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+기본 OMPL 파이프라인은 시간 파라미터화를 AddTimeOptimalParameterization만으로
+하는데, 그 플러그인 설명이 명시적으로 "Not jerk limited"다. 즉 궤적의 가속도가
+불연속이어서 waypoint 전환마다 jerk가 튀고, 가벼운 mycobot 280에서는 그것이
+기계적 울림으로 나타난다.
+
+ompl_planning.yaml 신규 — moveit_configs_utils 기본값을 복사한 뒤
+response_adapters에 AddRuckigTrajectorySmoothing만 추가(TOTG 뒤에 와야 함).
+그전까지 이 패키지에 ompl_planning.yaml이 없어 기본값을 쓰고 있었다.
+
+joint_limits.yaml — has_jerk_limits/max_jerk 추가. Ruckig은 jerk 한계가 없으면
+경고를 내고 하드코딩된 기본값으로 폴백하는데, 그 기본값이 크면 제한이 사실상
+안 걸린다. 처음 20.0으로 넣었을 때 실제로 궤적이 거의 바뀌지 않았고(가속 램프
+모양 비교로 확인), 5.0으로 낮추자 실물에서 뚜렷한 개선이 확인됐다.
+
+주의: 5.0이 개선을 냈다는 것은 실물 육안 관측이며, relay 로그의 가속 램프
+지표로는 차이가 확인되지 않았다(17Hz 샘플링으로는 2차 미분 차이가 묻히는 것으로
+추정). 값 조정 시 로그 지표보다 실물 체감을 기준으로 볼 것.
+
+이 파일들은 바깥 mycobot 저장소에서 gitignore되므로 그쪽 커밋에는 안 담긴다 —
+재클론/재vendoring 시 유실 주의(파일 주석에도 기록).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ .../config/joint_limits.yaml                  | 47 +++++++++++++++++++
+ .../config/ompl_planning.yaml                 | 40 ++++++++++++++++
+ 2 files changed, 87 insertions(+)
+ create mode 100644 mycobot_280/mycobot_280_moveit2/config/ompl_planning.yaml
+
+diff --git a/mycobot_280/mycobot_280_moveit2/config/joint_limits.yaml b/mycobot_280/mycobot_280_moveit2/config/joint_limits.yaml
+index 99555f1..bc25cca 100644
+--- a/mycobot_280/mycobot_280_moveit2/config/joint_limits.yaml
++++ b/mycobot_280/mycobot_280_moveit2/config/joint_limits.yaml
+@@ -7,34 +7,81 @@ default_acceleration_scaling_factor: 0.1
+ 
+ # Specific joint properties can be changed with the keys [max_position, min_position, max_velocity, max_acceleration]
+ # Joint limits can be turned off with [has_velocity_limits, has_acceleration_limits]
++# [2026-07-30, jerk 한계 추가] ompl_planning.yaml에 AddRuckigTrajectorySmoothing을
++# 넣으면서 함께 추가함. Ruckig은 jerk 한계가 없으면 경고를 내고 하드코딩된
++# 기본값으로 폴백하는데("Joint jerk limits are not defined. Using the default
++# ... rad/s^3. You can define jerk limits in joint_limits.yaml." —
++# libmoveit_trajectory_processing.so 문자열로 확인), 그 기본값이 크면 jerk
++# 제한이 사실상 안 걸려 스무딩 효과가 없다. 그래서 명시적으로 지정함.
++#
++# 값 근거: max_acceleration이 2.0 rad/s^2이므로 max_jerk 20.0이면 가속도가
++# 0에서 최대까지 오르는 데 2.0/20.0 = 0.1초가 걸린다. 이 0.1초의 완만한 가속도
++# 상승이 TOTG만 쓸 때의 가속도 불연속(jerk 무한)을 대체한다.
++# [2026-07-30, 2차] 20.0 -> 5.0. 20.0에서는 궤적이 사실상 안 바뀌었음 — relay
++# 로그로 가속 시작 램프를 Ruckig 적용 전/후 비교했더니 거의 동일했음:
++#   전: 4.2 -> 5.6 -> 7.1 -> 8.8 -> 10.5 -> 12.6 -> 13.7 -> 15.4 -> 17.2 -> 19.1
++#   후: 3.7 -> 5.2 -> 7.0 -> 8.1 -> 10.4 -> 11.7 -> 13.2 -> 14.7 -> 16.3 -> 18.8
++# (단위 °/s, 명령 간격 ~0.058s) 둘 다 거의 선형 증가로, jerk 제한이 걸렸다면
++# 초반이 더 완만한 S자여야 하는데 그렇지 않음. 설정 자체는 확실히 적용됨
++# (ros2 param get /move_group robot_description_planning.joint_limits.*.max_jerk
++#  = 20.0, has_jerk_limits = True, 어댑터 로드 확인, jerk 미정의 경고 없음).
++# 즉 20.0이 이 궤적이 실제로 요구하는 jerk보다 높아서 아무것도 깎이지 않았음 —
++# 램프가 약 0.5초에 걸쳐 0->19°/s로 오르므로 가속도 ~0.66 rad/s^2 수준이고,
++# 그걸 만드는 데 필요한 jerk는 20보다 훨씬 작다. 제한선을 실제 동작 아래로
++# 내려야 개입이 시작되므로 5.0으로 낮춤(가속도 2.0까지 오르는 데 0.4초).
++# 조정: 궤적이 굼떠지면 올리고(10.0), 더 강하게 깎으려면 낮춘다(2.0).
+ joint_limits:
+   joint2_to_joint1:
+     has_velocity_limits: true
+     max_velocity: 1.57
+     has_acceleration_limits: true
+     max_acceleration: 2.0
++    has_jerk_limits: true
++    max_jerk: 5.0
+   joint3_to_joint2:
+     has_velocity_limits: true
+     max_velocity: 1.57
+     has_acceleration_limits: true
+     max_acceleration: 2.0
++    has_jerk_limits: true
++    max_jerk: 5.0
+   joint4_to_joint3:
+     has_velocity_limits: true
+     max_velocity: 1.57
+     has_acceleration_limits: true
+     max_acceleration: 2.0
++    has_jerk_limits: true
++    max_jerk: 5.0
+   joint5_to_joint4:
+     has_velocity_limits: true
+     max_velocity: 1.57
+     has_acceleration_limits: true
+     max_acceleration: 2.0
++    has_jerk_limits: true
++    max_jerk: 5.0
+   joint6_to_joint5:
+     has_velocity_limits: true
+     max_velocity: 1.57
+     has_acceleration_limits: true
+     max_acceleration: 2.0
++    has_jerk_limits: true
++    max_jerk: 5.0
+   joint6output_to_joint6:
+     has_velocity_limits: true
+     max_velocity: 1.57
+     has_acceleration_limits: true
+     max_acceleration: 2.0
++    has_jerk_limits: true
++    max_jerk: 5.0
++  # [2026-07-27, 그리퍼 actuation 1단계] URDF(mycobot_280_m5_adaptive_gripper.urdf)의
++  # gripper_controller 조인트는 velocity="0"으로 정의돼 있어서(팔 6관절과 같은
++  # 패턴), 이 파일에서 명시적으로 채워주지 않으면 MoveIt의
++  # AddTimeOptimalParameterization이 "No velocity limit was defined" 에러로
++  # 궤적 생성 자체를 실패함(mock 스택으로 실측 확인).
++  gripper_controller:
++    has_velocity_limits: true
++    max_velocity: 1.0
++    has_acceleration_limits: true
++    max_acceleration: 2.0
++    has_jerk_limits: true
++    max_jerk: 5.0
+diff --git a/mycobot_280/mycobot_280_moveit2/config/ompl_planning.yaml b/mycobot_280/mycobot_280_moveit2/config/ompl_planning.yaml
+new file mode 100644
+index 0000000..142f04e
+--- /dev/null
++++ b/mycobot_280/mycobot_280_moveit2/config/ompl_planning.yaml
+@@ -0,0 +1,40 @@
++# [2026-07-30 신규] moveit_configs_utils의 기본 ompl_planning.yaml
++# (/opt/ros/jazzy/share/moveit_configs_utils/default_configs/ompl_planning.yaml)을
++# 그대로 복사한 뒤 response_adapters에 AddRuckigTrajectorySmoothing만 추가한 것.
++#
++# 추가 이유: 기본 파이프라인은 시간 파라미터화를 AddTimeOptimalParameterization
++# (TOTG)만으로 하는데, 그 플러그인 설명이 명시적으로 "Not jerk limited"임
++# (moveit_ros_planning/default_response_adapters_plugin_description.xml).
++# 즉 궤적의 가속도가 불연속이어서 waypoint 전환마다 jerk가 튀고, 가벼운
++# mycobot 280에서는 그것이 기계적 울림으로 나타남.
++#
++# 실물 증거(2026-07-30): VELOCITY_SCALING을 0.5로 올렸을 때 "전 구간에서
++# 흔들린다"가 됐는데, 그때 접근·후퇴 구간(scaling 0.2 유지)의 relay 명령은
++# 이전과 완전히 동일했음(ω 17.9°/s, 명령당 1.077°, dt 표준편차 0.0046s).
++# 명령이 그대로인데 흔들린다는 것은 원인이 명령 스트림 밖(=기계 진동)이라는
++# 뜻이고, jerk 미제한이 그 유력한 원인.
++#
++# Ruckig은 TOTG 뒤에 붙어야 함(플러그인 설명: "Best used after a time
++# parameterization algorithm such as TimeOptimalParameterization") — 아래 순서
++# 그대로 유지할 것.
++#
++# ⚠️ 이 파일은 src/mycobot_ros2/(gitignore된 중첩 저장소) 안에 있어서 바깥
++# mycobot 저장소의 git으로는 추적되지 않음. initial_positions.yaml과 같은
++# 위험이 있으니 재클론/재vendoring 시 유실 주의.
++#
++# 확인 방법: 스택 재시작 후 move_group 로그에
++#   Calling PlanningResponseAdapter 'AddRuckigTrajectorySmoothing'
++# 가 찍히는지 볼 것.
++planning_plugins:
++  - ompl_interface/OMPLPlanner
++# The order of the elements in the adapter corresponds to the order they are processed by the motion planning pipeline.
++request_adapters:
++  - default_planning_request_adapters/ResolveConstraintFrames
++  - default_planning_request_adapters/ValidateWorkspaceBounds
++  - default_planning_request_adapters/CheckStartStateBounds
++  - default_planning_request_adapters/CheckStartStateCollision
++response_adapters:
++  - default_planning_response_adapters/AddTimeOptimalParameterization
++  - default_planning_response_adapters/AddRuckigTrajectorySmoothing
++  - default_planning_response_adapters/ValidateSolution
++  - default_planning_response_adapters/DisplayMotionPath

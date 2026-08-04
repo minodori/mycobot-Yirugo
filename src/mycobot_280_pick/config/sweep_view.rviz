@@ -1,0 +1,156 @@
+# 검출 토마토 스윕(scripts/sweep_targets_planned.py --display-pause)을 눈으로
+# 보거나 영상으로 녹화할 때 쓰는 RViz 설정.
+#
+#   rviz2 -d src/mycobot_280_pick/config/sweep_view.rviz
+#
+# 담긴 디스플레이:
+#   RobotModel     look pose에 선 팔(시작 자세)
+#   RobotState     /sweep_robot_state — 스크립트가 직접 그리는 재생 프레임
+#   Trajectory     꺼 둠 (재생 속도 조절이 안 되는 문제 — 아래 주석)
+#   PlanningScene  씬에 든 장애물 — 주입한 octomap voxel과 토마토 구
+#   MarkerArray    /tomato_markers — 검출된 토마토 15개 + 좌상단 상태 라벨.
+#                  빨강=ripe, 주황=disease, 초록=계획 성공, 회색=계획 실패,
+#                  현재 목표는 1.6배 크게 그린다
+#
+# [2026-08-01] PlanningScene을 추가했다. 그전에는 궤적과 목표만 보였는데,
+# 그러면 **팔이 무엇을 피해 가는지가 화면에 없다.** octomap 재검증
+# (docs/ARMED_POSE_HANDOFF.md 5절) 이후로는 씬에 줄기·지지대 voxel 988개가
+# 들어가므로, 그게 안 보이면 "왜 이 목표만 실패하는지"를 눈으로 못 쫓는다.
+# 카메라 관련 디스플레이는 여전히 없다 — 이 스윕은 로봇도 카메라도 없이 돈다.
+#
+# Color Transformer를 하드코딩하지 않는 이유는 scene_replay.rviz 주석 참고.
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded: ~
+    Tree Height: 700
+Visualization Manager:
+  Class: ""
+  Name: root
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 0.1
+      Plane Cell Count: 20
+      Color: 160; 160; 164
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Enabled: true
+      Description Source: Topic
+      Description Topic:
+        Value: /robot_description
+        Depth: 5
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+      Alpha: 0.6
+    # [2026-08-01] 애니메이션은 스크립트가 직접 그린다(RobotState 디스플레이).
+    # 이 Trajectory 디스플레이는 **꺼 둔다** — 재생 속도가 State Display Time에
+    # 걸려 있는데, 이 MoveIt(2.12.4)의 유효값은 `0.5x`/`0.05s`/`0.1s`/`0.5s`이고
+    # 파싱에 실패하면 조용히 기본값 `3x`로 돌아가서 조절이 안 되는 것처럼 보인다.
+    # 켜면 두 벌이 겹쳐 재생되니 둘 중 하나만 쓸 것.
+    - Class: moveit_rviz_plugin/RobotState
+      Name: 재생 (계획 경로)
+      Enabled: true
+      Robot Description: robot_description
+      Robot State Topic: /sweep_robot_state
+      Robot Alpha: 1.0
+      Show All Links: true
+      Show Highlights: true
+    - Class: moveit_rviz_plugin/Trajectory
+      Name: Trajectory (안 씀)
+      Enabled: false
+      Robot Description: robot_description
+      # move_group이 /display_planned_path에 원본 궤적을 같이 쏘므로 전용 토픽을 본다
+      # (sweep_targets_planned.py DISPLAY_TOPIC). 그 토픽을 보면 목표당 궤적이
+      # 열댓 개 흘러 재생 속도 조절이 통하지 않는다.
+      Trajectory Topic: /sweep_display_path
+      Show Robot Visual: true
+      Show Robot Collision: false
+      Show Trail: false
+      # 루프를 켜 두면 --display-pause 동안 반복 재생되어 보기 좋다.
+      Loop Animation: true
+      # 새 궤적이 오면 즉시 갈아탄다. false면 재생 중인 것이 끝날 때까지 기다려
+      # 목표 전환이 밀린다.
+      Interrupt Display: true
+      # [2026-08-01] "0.05 s"(웨이포인트당 고정 시간)에서 REALTIME으로 바꿨다.
+      # 고정 시간은 time_from_start를 무시하고 점 개수 x 그 값으로 재생하므로,
+      # 스크립트가 재생 길이를 정하는 --display-seconds가 통하지 않는다.
+      # **REALTIME으로 두고 속도는 --display-seconds로 조절할 것.**
+      State Display Time: REALTIME
+    - Class: moveit_rviz_plugin/PlanningScene
+      Name: PlanningScene (장애물)
+      Enabled: true
+      Robot Description: robot_description
+      Planning Scene Topic: /monitored_planning_scene
+      Scene Geometry:
+        # [2026-08-03] 0.7 -> 0.35. replay_sweep.rviz와 같은 이유 —
+        # 토마토 collision object(검출 반지름 +10mm)가 실제 열매를 덮는다.
+        Scene Alpha: 0.35
+        Scene Display Time: 0.01
+        Show Scene Geometry: true
+        Voxel Rendering: Occupied Voxels
+        Voxel Coloring: Z-Axis
+      # 씬 로봇은 끈다 — RobotModel·Trajectory와 겹쳐 팔이 세 벌 보인다.
+      Scene Robot:
+        Show Robot Visual: false
+        Show Robot Collision: false
+    - Class: rviz_default_plugins/MarkerArray
+      Name: 토마토 (검출 결과)
+      Enabled: true
+      Topic:
+        Value: /tomato_markers
+        Depth: 10
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+    # [2026-08-03] 우클릭 제어판(rviz_control_panel_node). 이게 없으면 노드를
+    # 띄워도 **큐브가 안 보인다** — 실제로 겪었다. 네임스페이스는 그 노드가
+    # InteractiveMarkerServer에 준 이름과 같아야 한다('rviz_control_panel').
+    #
+    # 메뉴: look pose 이동 / 수확 시퀀스 시작 / 정지(소프트) / 서보 릴리즈 /
+    #       서보 재포커스 / grasp 확인 / 재생 속도 x1~x5
+    - Class: rviz_default_plugins/InteractiveMarkers
+      Name: 제어판 (우클릭)
+      Enabled: true
+      Interactive Markers Namespace: /rviz_control_panel
+      Show Axes: false
+      Show Descriptions: true
+      Show Visual Aids: false
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+      Marker Scale: 0.15
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: g_base
+    Frame Rate: 30
+  Tools:
+    # [2026-08-03] **Interact가 없으면 제어판 우클릭 메뉴가 안 열린다.**
+    # 큐브는 보이는데 메뉴만 안 나오는 증상의 원인이었다 — 대화형
+    # 마커는 이 도구가 활성일 때만 마우스 이벤트를 받는다.
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Distance: 1.0
+      Yaw: 5.5
+      Pitch: 0.35
+      Focal Point:
+        X: 0.2
+        Y: 0
+        Z: 0.25
+      Near Clip Distance: 0.01
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 1000
+  Width: 1600

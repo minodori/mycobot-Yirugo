@@ -1,0 +1,1416 @@
+diff --git a/mecharm/mecharm/setup.cfg b/mecharm/mecharm/setup.cfg
+index 633b43d..c9221f3 100644
+--- a/mecharm/mecharm/setup.cfg
++++ b/mecharm/mecharm/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mecharm
++script_dir=$base/lib/mecharm
+ 
+ [install]
+-install-scripts=$base/lib/mecharm
++install_scripts=$base/lib/mecharm
+diff --git a/mecharm/mecharm_pi/setup.cfg b/mecharm/mecharm_pi/setup.cfg
+index 3a3bc39..410758e 100644
+--- a/mecharm/mecharm_pi/setup.cfg
++++ b/mecharm/mecharm_pi/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mecharm_pi
++script_dir=$base/lib/mecharm_pi
+ 
+ [install]
+-install-scripts=$base/lib/mecharm_pi
++install_scripts=$base/lib/mecharm_pi
+diff --git a/mycobot_280/mycobot_280/setup.cfg b/mycobot_280/mycobot_280/setup.cfg
+index 0967ff0..85bd7e7 100644
+--- a/mycobot_280/mycobot_280/setup.cfg
++++ b/mycobot_280/mycobot_280/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_280
++script_dir=$base/lib/mycobot_280
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_280
++install_scripts=$base/lib/mycobot_280
+diff --git a/mycobot_280/mycobot_280_arduino/setup.cfg b/mycobot_280/mycobot_280_arduino/setup.cfg
+index 9f0f935..7e3d84a 100644
+--- a/mycobot_280/mycobot_280_arduino/setup.cfg
++++ b/mycobot_280/mycobot_280_arduino/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_280_arduino
++script_dir=$base/lib/mycobot_280_arduino
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_280_arduino
++install_scripts=$base/lib/mycobot_280_arduino
+diff --git a/mycobot_280/mycobot_280_moveit2/config/firefighter.ros2_control.xacro b/mycobot_280/mycobot_280_moveit2/config/firefighter.ros2_control.xacro
+index bbf976e..0faa07a 100644
+--- a/mycobot_280/mycobot_280_moveit2/config/firefighter.ros2_control.xacro
++++ b/mycobot_280/mycobot_280_moveit2/config/firefighter.ros2_control.xacro
+@@ -50,6 +50,15 @@
+                 </state_interface>
+                 <state_interface name="velocity"/>
+             </joint>
++            <!-- adaptive gripper 마스터 조인트. 나머지 5개(gripper_base_to_gripper_left2 등)는
++                 URDF 상 이 조인트를 mimic 하므로 별도 인터페이스 불필요 -->
++            <joint name="gripper_controller">
++                <command_interface name="position"/>
++                <state_interface name="position">
++                  <param name="initial_value">${initial_positions['gripper_controller']}</param>
++                </state_interface>
++                <state_interface name="velocity"/>
++            </joint>
+ 
+         </ros2_control>
+     </xacro:macro>
+diff --git a/mycobot_280/mycobot_280_moveit2/config/firefighter.srdf b/mycobot_280/mycobot_280_moveit2/config/firefighter.srdf
+index 631f796..b6ef9bd 100644
+--- a/mycobot_280/mycobot_280_moveit2/config/firefighter.srdf
++++ b/mycobot_280/mycobot_280_moveit2/config/firefighter.srdf
+@@ -28,6 +28,42 @@
+         <joint name="joint6_to_joint5" value="0"/>
+         <joint name="joint6output_to_joint6" value="0"/>
+     </group_state>
++    <!-- look pose (docs/look_pose.md 참고, initial_positions.yaml과 동일한 라디안 값).
++         RViz Planning 탭의 Select Start/Goal State 드롭다운에서 바로 선택 가능하게
++         하기 위해 추가함 — 실물 팔을 이 자세로 되돌릴 때 마커를 손으로 다시
++         맞추지 않고 이 이름을 선택 후 Plan & Execute하면 됨. -->
++    <group_state name="look_pose" group="arm_group">
++        <joint name="joint2_to_joint1" value="-0.130376"/>
++        <joint name="joint3_to_joint2" value="1.816190"/>
++        <joint name="joint4_to_joint3" value="-0.989253"/>
++        <joint name="joint5_to_joint4" value="-0.872665"/>
++        <joint name="joint6_to_joint5" value="0.279078"/>
++        <joint name="joint6output_to_joint6" value="0.024435"/>
++    </group_state>
++    <!-- [2026-07-27, 그리퍼 actuation 1단계] 실제 파지 동작을 위한 그리퍼
++         플래닝 그룹. gripper_controller 하나만 실제(mimic 아닌) 조인트고
++         나머지 5개 손가락 조인트는 URDF에서 이 조인트를 mimic함(자동 추종,
++         SRDF 그룹에도 gripper_controller 하나만 넣으면 됨). -->
++    <group name="gripper">
++        <joint name="gripper_controller"/>
++    </group>
++    <!-- [2026-07-27] URDF 조인트 한계(gripper_controller: -0.74~0.15rad) 근처를
++         open/closed로 채택함 — so101 교훈("그리퍼 열기"를 파지 파이프라인의
++         명시적 단계로 반드시 넣을 것, docs/obstacle_avoidance_manual_test.md
++         "[Tier5]" 절 참고)을 mycobot에 처음 적용하는 단계. 상한값(0.15)을
++         그대로 쓰면 OMPL이 "Insufficient states in sampleable goal region"으로
++         플래닝을 매번 실패함(경계에 정확히 걸쳐 샘플링 여유가 없음, mock
++         스택으로 실측 확인) — 양 끝에서 여유를 두고 잡음(coord_to_goal_node.py
++         GRIPPER_OPEN_POSITION/GRIPPER_CLOSED_POSITION과 반드시 동일하게 유지).
++         ⚠️ 어느 값이 실제로 "열림"인지는 RViz/실물 육안 확인 전(URDF
++         지오메트리만으로는 회전 방향의 물리적 의미를 확정하기 어려움) —
++         반대로 보이면 이 두 값과 coord_to_goal_node.py 상수를 같이 맞바꿀 것. -->
++    <group_state name="gripper_open" group="gripper">
++        <joint name="gripper_controller" value="0.12"/>
++    </group_state>
++    <group_state name="gripper_closed" group="gripper">
++        <joint name="gripper_controller" value="-0.6"/>
++    </group_state>
+     <!--VIRTUAL JOINT: Purpose: this element defines a virtual joint between a robot link and an external frame of reference (considered fixed with respect to the robot)-->
+     <virtual_joint name="virtual_joints" type="fixed" parent_frame="world" child_link="g_base"/>
+     <!--DISABLE COLLISIONS: By default it is assumed that any link of the robot could potentially come into collision with any other link in the robot. This tag disables collision checking between a specified pair of links. -->
+@@ -45,4 +81,72 @@
+     <disable_collisions link1="joint5" link2="joint6" reason="Adjacent"/>
+     <disable_collisions link1="joint5" link2="joint6_flange" reason="Never"/>
+     <disable_collisions link1="joint6" link2="joint6_flange" reason="Adjacent"/>
++    <!-- 그리퍼(mycobot_280_m5_adaptive_gripper) 자체충돌 행렬 — setup_assistant로 정식 재생성
++         전까지의 임시 패치. 손가락 링크들은 구조상 항상 서로 인접/겹쳐 있고, g_base와는
++         팔 길이상 물리적으로 닿을 수 없어 Never로 처리. -->
++    <disable_collisions link1="gripper_base" link2="gripper_left1" reason="Adjacent"/>
++    <disable_collisions link1="gripper_base" link2="gripper_left2" reason="Adjacent"/>
++    <disable_collisions link1="gripper_base" link2="gripper_left3" reason="Adjacent"/>
++    <disable_collisions link1="gripper_base" link2="gripper_right1" reason="Adjacent"/>
++    <disable_collisions link1="gripper_base" link2="gripper_right2" reason="Adjacent"/>
++    <disable_collisions link1="gripper_base" link2="gripper_right3" reason="Adjacent"/>
++    <disable_collisions link1="gripper_left1" link2="gripper_left2" reason="Adjacent"/>
++    <disable_collisions link1="gripper_left1" link2="gripper_left3" reason="Adjacent"/>
++    <disable_collisions link1="gripper_left2" link2="gripper_left3" reason="Adjacent"/>
++    <disable_collisions link1="gripper_right1" link2="gripper_right2" reason="Adjacent"/>
++    <disable_collisions link1="gripper_right1" link2="gripper_right3" reason="Adjacent"/>
++    <disable_collisions link1="gripper_right2" link2="gripper_right3" reason="Adjacent"/>
++    <!-- [2026-07-27, 그리퍼 actuation 1단계] 좌우 손가락 교차 쌍 — 위 self-
++         collision 행렬이 "같은 쪽" 링크만 다뤄서 빠져 있던 부분. 그리퍼를
++         실제로 open/closed 그룹 상태로 움직여보니 gripper_open(0.12rad)에서
++         `gripper_left3` <-> `gripper_right3`가 충돌로 잡혀 플래닝 자체가
++         "Insufficient states in sampleable goal region"으로 실패함(mock
++         스택 실측). 정식 setup_assistant 재생성 전까지, 대칭 구조상 항상
++         가까이 있는 좌우 대응 링크 9쌍 전부를 임시로 허용함(위 "같은 쪽"
++         패치와 동일한 임시방편 — 실제 파지 대상(target_object)과의 충돌은
++         별도로 검사되므로 안전성 저하는 아님). -->
++    <disable_collisions link1="gripper_left1" link2="gripper_right1" reason="Never"/>
++    <disable_collisions link1="gripper_left1" link2="gripper_right2" reason="Never"/>
++    <disable_collisions link1="gripper_left1" link2="gripper_right3" reason="Never"/>
++    <disable_collisions link1="gripper_left2" link2="gripper_right1" reason="Never"/>
++    <disable_collisions link1="gripper_left2" link2="gripper_right2" reason="Never"/>
++    <disable_collisions link1="gripper_left2" link2="gripper_right3" reason="Never"/>
++    <disable_collisions link1="gripper_left3" link2="gripper_right1" reason="Never"/>
++    <disable_collisions link1="gripper_left3" link2="gripper_right2" reason="Never"/>
++    <disable_collisions link1="gripper_left3" link2="gripper_right3" reason="Never"/>
++    <!-- [2026-07-27, gripper_base 마운트 180도 보정 후] joint6output_to_gripper_base
++         origin의 roll 부호를 바로잡아 실물과 RViz 방향을 일치시켰더니(실물/
++         RViz 육안 확인 완료, 간섭 없음), 콜리전 메시가 실제보다 넉넉하게
++         잡혀 그리퍼 열기 동작 중 `joint5`(손목)와 `gripper_left1`이 충돌로
++         잡히는 것을 확인함 — RViz look pose->목표 애니메이션과 실물 둘 다
++         실제 간섭 없음 확인(사용자 확인), 위 joint6/joint6_flange 패치와
++         같은 이유(콜리전 메시 여유)로 joint5도 전부 허용. -->
++    <disable_collisions link1="gripper_base" link2="joint5" reason="Never"/>
++    <disable_collisions link1="gripper_left1" link2="joint5" reason="Never"/>
++    <disable_collisions link1="gripper_left2" link2="joint5" reason="Never"/>
++    <disable_collisions link1="gripper_left3" link2="joint5" reason="Never"/>
++    <disable_collisions link1="gripper_right1" link2="joint5" reason="Never"/>
++    <disable_collisions link1="gripper_right2" link2="joint5" reason="Never"/>
++    <disable_collisions link1="gripper_right3" link2="joint5" reason="Never"/>
++    <disable_collisions link1="gripper_base" link2="joint6" reason="Adjacent"/>
++    <disable_collisions link1="gripper_base" link2="joint6_flange" reason="Adjacent"/>
++    <disable_collisions link1="gripper_left1" link2="joint6" reason="Never"/>
++    <disable_collisions link1="gripper_left1" link2="joint6_flange" reason="Never"/>
++    <disable_collisions link1="gripper_left2" link2="joint6" reason="Never"/>
++    <disable_collisions link1="gripper_left2" link2="joint6_flange" reason="Never"/>
++    <disable_collisions link1="gripper_left3" link2="joint6" reason="Never"/>
++    <disable_collisions link1="gripper_left3" link2="joint6_flange" reason="Never"/>
++    <disable_collisions link1="gripper_right1" link2="joint6" reason="Never"/>
++    <disable_collisions link1="gripper_right1" link2="joint6_flange" reason="Never"/>
++    <disable_collisions link1="gripper_right2" link2="joint6" reason="Never"/>
++    <disable_collisions link1="gripper_right2" link2="joint6_flange" reason="Never"/>
++    <disable_collisions link1="gripper_right3" link2="joint6" reason="Never"/>
++    <disable_collisions link1="gripper_right3" link2="joint6_flange" reason="Never"/>
++    <disable_collisions link1="gripper_base" link2="g_base" reason="Never"/>
++    <disable_collisions link1="gripper_left1" link2="g_base" reason="Never"/>
++    <disable_collisions link1="gripper_left2" link2="g_base" reason="Never"/>
++    <disable_collisions link1="gripper_left3" link2="g_base" reason="Never"/>
++    <disable_collisions link1="gripper_right1" link2="g_base" reason="Never"/>
++    <disable_collisions link1="gripper_right2" link2="g_base" reason="Never"/>
++    <disable_collisions link1="gripper_right3" link2="g_base" reason="Never"/>
+ </robot>
+diff --git a/mycobot_280/mycobot_280_moveit2/config/firefighter.urdf.xacro b/mycobot_280/mycobot_280_moveit2/config/firefighter.urdf.xacro
+index 198eaf1..902314f 100644
+--- a/mycobot_280/mycobot_280_moveit2/config/firefighter.urdf.xacro
++++ b/mycobot_280/mycobot_280_moveit2/config/firefighter.urdf.xacro
+@@ -2,8 +2,8 @@
+ <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="firefighter">
+     <xacro:arg name="initial_positions_file" default="initial_positions.yaml" />
+ 
+-    <!-- Import firefighter urdf file -->
+-    <xacro:include filename="$(find mycobot_description)/urdf/mycobot_280_m5/mycobot_280_m5.urdf" />
++    <!-- Import firefighter urdf file (표준 adaptive gripper 포함) -->
++    <xacro:include filename="$(find mycobot_description)/urdf/mycobot_280_m5/mycobot_280_m5_adaptive_gripper.urdf" />
+ 
+     <!-- Import control_xacro -->
+     <xacro:include filename="firefighter.ros2_control.xacro" />
+diff --git a/mycobot_280/mycobot_280_moveit2/config/initial_positions.yaml b/mycobot_280/mycobot_280_moveit2/config/initial_positions.yaml
+index 05c063e..cb0dd08 100644
+--- a/mycobot_280/mycobot_280_moveit2/config/initial_positions.yaml
++++ b/mycobot_280/mycobot_280_moveit2/config/initial_positions.yaml
+@@ -1,9 +1,13 @@
+ # Default initial positions for firefighter's ros2_control fake system
+-
++#
++# look pose로 고정(docs/look_pose.md 참고, 2026-07-23 확정) — 실물 팔이 이 자세로
++# 손으로 맞춰져 있어, 시뮬레이션도 같은 값으로 시작해야 camera_link TF(joint6 기준
++# handeye 고정 변환)가 실제 D435 위치와 일치함.
+ initial_positions:
+-  joint2_to_joint1: 0
+-  joint3_to_joint2: 0
+-  joint4_to_joint3: 0
+-  joint5_to_joint4: 0
+-  joint6_to_joint5: 0
+-  joint6output_to_joint6: 0
+\ No newline at end of file
++  joint2_to_joint1: -0.130376
++  joint3_to_joint2: 1.816190
++  joint4_to_joint3: -0.989253
++  joint5_to_joint4: -0.872665
++  joint6_to_joint5: 0.279078
++  joint6output_to_joint6: 0.024435
++  gripper_controller: 0
+\ No newline at end of file
+diff --git a/mycobot_280/mycobot_280_moveit2/config/moveit.rviz b/mycobot_280/mycobot_280_moveit2/config/moveit.rviz
+index b922ef5..0363623 100644
+--- a/mycobot_280/mycobot_280_moveit2/config/moveit.rviz
++++ b/mycobot_280/mycobot_280_moveit2/config/moveit.rviz
+@@ -1,51 +1,532 @@
+ Panels:
+   - Class: rviz_common/Displays
++    Help Height: 149
+     Name: Displays
+     Property Tree Widget:
+       Expanded:
+-        - /MotionPlanning1
++        - /MotionPlanning1/Scene Geometry1
++        - /MotionPlanning1/Planning Request1
++        - /MotionPlanning1/Planning Metrics1
++        - /MotionPlanning1/Planned Path1
++        - /TF1/Frames1
++        - /TF1/Tree1
++      Splitter Ratio: 0.640545129776001
++    Tree Height: 1218
+   - Class: rviz_common/Help
+     Name: Help
+   - Class: rviz_common/Views
++    Expanded:
++      - /Current View1
+     Name: Views
++    Splitter Ratio: 0.5
+ Visualization Manager:
++  Class: ""
+   Displays:
+-    - Class: rviz_default_plugins/Grid
++    - Alpha: 0.5
++      Cell Size: 1
++      Class: rviz_default_plugins/Grid
++      Color: 160; 160; 164
++      Enabled: true
++      Line Style:
++        Line Width: 0.029999999329447746
++        Value: Lines
+       Name: Grid
++      Normal Cell Count: 0
++      Offset:
++        X: 0
++        Y: 0
++        Z: 0
++      Plane: XY
++      Plane Cell Count: 10
++      Reference Frame: <Fixed Frame>
+       Value: true
+-    - Class: moveit_rviz_plugin/MotionPlanning
++    - Acceleration_Scaling_Factor: 0.4
++      Class: moveit_rviz_plugin/MotionPlanning
++      Enabled: true
++      Move Group Namespace: ""
++      MoveIt_Allow_Approximate_IK: false
++      MoveIt_Allow_External_Program: false
++      MoveIt_Allow_Replanning: false
++      MoveIt_Allow_Sensor_Positioning: false
++      MoveIt_Planning_Attempts: 0
++      MoveIt_Planning_Time: 0
++      MoveIt_Use_Cartesian_Path: false
++      MoveIt_Use_Constraint_Aware_IK: false
++      MoveIt_Workspace:
++        Center:
++          X: 0
++          Y: 0
++          Z: 0
++        Size:
++          X: 2
++          Y: 2
++          Z: 2
+       Name: MotionPlanning
+       Planned Path:
+-        Loop Animation: true
+-        State Display Time: 0.05 s
++        Color Enabled: false
++        Interrupt Display: false
++        Links:
++          All Links Enabled: true
++          Expand Joint Details: false
++          Expand Link Details: false
++          Expand Tree: false
++          Link Tree Style: Links in Alphabetic Order
++          g_base:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_base:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_left1:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_left2:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_left3:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_right1:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_right2:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_right3:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint1:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint2:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint3:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint4:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint5:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint6:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint6_flange:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++        Loop Animation: false
++        Robot Alpha: 0.5
++        Robot Color: 150; 50; 150
++        Show Robot Collision: false
++        Show Robot Visual: true
++        Show Trail: false
++        State Display Time: 0.5s
++        Trail Step Size: 1
+         Trajectory Topic: display_planned_path
++        Use Sim Time: false
++      Planning Metrics:
++        Payload: 1
++        Show Joint Torques: false
++        Show Manipulability: false
++        Show Manipulability Index: false
++        Show Weight Limit: false
++        TextHeight: 0.019999999552965164
++      Planning Request:
++        Colliding Link Color: 255; 0; 0
++        Goal State Alpha: 1
++        Goal State Color: 250; 128; 0
++        Interactive Marker Size: 0
++        Joint Violation Color: 255; 0; 255
++        Planning Group: arm_group
++        Query Goal State: true
++        Query Start State: false
++        Show Workspace: false
++        Start State Alpha: 1
++        Start State Color: 0; 255; 0
+       Planning Scene Topic: monitored_planning_scene
+       Robot Description: robot_description
+       Scene Geometry:
+         Scene Alpha: 1
++        Scene Color: 50; 230; 50
++        Scene Display Time: 0.009999999776482582
++        Show Scene Geometry: true
++        Voxel Coloring: Z-Axis
++        Voxel Rendering: Occupied Voxels
+       Scene Robot:
++        Attached Body Color: 150; 50; 150
++        Links:
++          All Links Enabled: true
++          Expand Joint Details: false
++          Expand Link Details: false
++          Expand Tree: false
++          Link Tree Style: Links in Alphabetic Order
++          g_base:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_base:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_left1:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_left2:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_left3:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_right1:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_right2:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          gripper_right3:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint1:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint2:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint3:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint4:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint5:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint6:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
++          joint6_flange:
++            Alpha: 1
++            Show Axes: false
++            Show Trail: false
++            Value: true
+         Robot Alpha: 0.5
++        Show Robot Collision: false
++        Show Robot Visual: true
++      Value: true
++      Velocity_Scaling_Factor: 0.6
++    - Class: rviz_default_plugins/TF
++      Enabled: true
++      Filter (blacklist): ""
++      Filter (whitelist): ""
++      Frame Timeout: 15
++      Frames:
++        All Enabled: false
++        camera_color_frame:
++          Value: false
++        camera_color_optical_frame:
++          Value: false
++        camera_depth_frame:
++          Value: false
++        camera_depth_optical_frame:
++          Value: false
++        camera_link:
++          Value: false
++        g_base:
++          Value: true
++        gripper_base:
++          Value: false
++        gripper_left1:
++          Value: false
++        gripper_left2:
++          Value: false
++        gripper_left3:
++          Value: false
++        gripper_right1:
++          Value: false
++        gripper_right2:
++          Value: false
++        gripper_right3:
++          Value: false
++        joint1:
++          Value: false
++        joint2:
++          Value: false
++        joint3:
++          Value: false
++        joint4:
++          Value: false
++        joint5:
++          Value: false
++        joint6:
++          Value: false
++        joint6_flange:
++          Value: false
++        world:
++          Value: false
++      Marker Scale: 1
++      Name: TF
++      Show Arrows: true
++      Show Axes: true
++      Show Names: false
++      Tree:
++        world:
++          g_base:
++            joint1:
++              joint2:
++                joint3:
++                  joint4:
++                    joint5:
++                      joint6:
++                        camera_link:
++                          camera_color_frame:
++                            camera_color_optical_frame:
++                              {}
++                          camera_depth_frame:
++                            camera_depth_optical_frame:
++                              {}
++                        joint6_flange:
++                          gripper_base:
++                            gripper_left2:
++                              {}
++                            gripper_left3:
++                              gripper_left1:
++                                {}
++                            gripper_right2:
++                              {}
++                            gripper_right3:
++                              gripper_right1:
++                                {}
++      Update Interval: 0
++      Value: true
++    - Alpha: 1
++      Class: rviz_default_plugins/RobotModel
++      Collision Enabled: false
++      Description File: ""
++      Description Source: Topic
++      Description Topic:
++        Depth: 5
++        Durability Policy: Volatile
++        History Policy: Keep Last
++        Reliability Policy: Reliable
++        Value: /robot_description
++      Enabled: true
++      Links:
++        All Links Enabled: true
++        Expand Joint Details: false
++        Expand Link Details: false
++        Expand Tree: false
++        Link Tree Style: Links in Alphabetic Order
++        g_base:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        gripper_base:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        gripper_left1:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        gripper_left2:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        gripper_left3:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        gripper_right1:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        gripper_right2:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        gripper_right3:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        joint1:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        joint2:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        joint3:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        joint4:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        joint5:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        joint6:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++        joint6_flange:
++          Alpha: 1
++          Show Axes: false
++          Show Trail: false
++          Value: true
++      Mass Properties:
++        Inertia: false
++        Mass: false
++      Name: RobotModel
++      TF Prefix: ""
++      Update Interval: 0
++      Value: true
++      Visual Enabled: true
++    - Class: rviz_default_plugins/InteractiveMarkers
++      Enable Transparency: true
++      Enabled: true
++      Interactive Markers Namespace: rviz_control_panel
++      Name: InteractiveMarkers
++      Show Axes: false
++      Show Descriptions: true
++      Show Visual Aids: false
+       Value: true
++  Enabled: true
+   Global Options:
++    Background Color: 48; 48; 48
+     Fixed Frame: g_base
++    Frame Rate: 30
++  Name: root
+   Tools:
+     - Class: rviz_default_plugins/Interact
++      Hide Inactive Objects: true
+     - Class: rviz_default_plugins/MoveCamera
+     - Class: rviz_default_plugins/Select
++    - Class: rviz_default_plugins/PublishPoint
++      Single click: true
++      Topic:
++        Depth: 5
++        Durability Policy: Volatile
++        History Policy: Keep Last
++        Reliability Policy: Reliable
++        Value: /clicked_point
++  Transformation:
++    Current:
++      Class: rviz_default_plugins/TF
+   Value: true
+   Views:
+     Current:
+-      Class: rviz_default_plugins/Orbit
+-      Distance: 2.0
++      Class: rviz_default_plugins/ThirdPersonFollower
++      Distance: 2.234163522720337
++      Enable Stereo Rendering:
++        Stereo Eye Separation: 0.05999999865889549
++        Stereo Focal Distance: 1
++        Swap Stereo Eyes: false
++        Value: false
+       Focal Point:
+-        X: -0.1
+-        Y: 0.25
+-        Z: 0.30
++        X: -0.02925136685371399
++        Y: -0.04696302115917206
++        Z: 2.980232238769531e-07
++      Focal Shape Fixed Size: false
++      Focal Shape Size: 0.05000000074505806
++      Invert Z Axis: false
+       Name: Current View
+-      Pitch: 0.5
++      Near Clip Distance: 0.009999999776482582
++      Pitch: 0.5747979879379272
+       Target Frame: g_base
+-      Yaw: -0.623
++      Value: ThirdPersonFollower (rviz_default_plugins)
++      Yaw: 4.003610134124756
++    Saved: ~
+ Window Geometry:
+-  Height: 975
+-  QMainWindow State: 000000ff00000000fd0000000100000000000002b400000375fc0200000005fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000004100fffffffb000000100044006900730070006c006100790073010000003d00000123000000c900fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e00670100000166000001910000018800fffffffb0000000800480065006c0070000000029a0000006e0000006e00fffffffb0000000a0056006900650077007301000002fd000000b5000000a400ffffff000001f60000037500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+-  Width: 1200
++  Displays:
++    collapsed: false
++  Height: 2416
++  Help:
++    collapsed: false
++  Hide Left Dock: false
++  Hide Right Dock: false
++  MotionPlanning:
++    collapsed: false
++  MotionPlanning - Trajectory Slider:
++    collapsed: false
++  QMainWindow State: 000000ff00000000fd0000000200000000000003ee000008c4fc020000000efb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000008900fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e00670100000078000008c40000030300fffffffb0000000800480065006c0070000000029a0000006e000000e700fffffffb0000002600480061006e0064004500790065002000430061006c006900620072006100740069006f006e0100000043000002b90000000000000000fb0000000a0049006d00610067006500000003c4000000d30000000000000000fb0000000a0049006d0061006700650000000278000001460000000000000000fb0000000a0049006d00610067006500000002e0000000de0000000000000000fb0000000a0049006d0061006700650000000651000002eb0000000000000000fb0000000a0049006d006100670065000000083f000000c30000000000000000fb0000000a0049006d006100670065000000062d0000002c0000000000000000fb0000000a0049006d00610067006500000002e8000000d60000000000000000fb0000000a0049006d006100670065010000038f000001080000000000000000fb0000000a0049006d006100670065010000063c000003000000000000000000fb0000000a0049006d0061006700650000000666000002d600000000000000000000000100000357000008c4fc0200000002fb0000000a005600690065007700730100000078000002e40000015300fffffffb000000100044006900730070006c0061007900730100000369000005d3000001a600ffffff0000081d000008c400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
++  Views:
++    collapsed: false
++  Width: 3964
++  X: 208
++  Y: 70
+diff --git a/mycobot_280/mycobot_280_moveit2/config/moveit_controllers.yaml b/mycobot_280/mycobot_280_moveit2/config/moveit_controllers.yaml
+index 5807588..1ee1aea 100644
+--- a/mycobot_280/mycobot_280_moveit2/config/moveit_controllers.yaml
++++ b/mycobot_280/mycobot_280_moveit2/config/moveit_controllers.yaml
+@@ -5,6 +5,7 @@ moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControll
+ moveit_simple_controller_manager:
+   controller_names:
+     - arm_group_controller
++    - gripper_group_controller
+ 
+   arm_group_controller:
+     type: FollowJointTrajectory
+@@ -16,4 +17,13 @@ moveit_simple_controller_manager:
+       - joint4_to_joint3
+       - joint5_to_joint4
+       - joint6_to_joint5
+-      - joint6output_to_joint6
+\ No newline at end of file
++      - joint6output_to_joint6
++
++  # [2026-07-27, 그리퍼 actuation 1단계] SRDF "gripper" 그룹(gripper_controller
++  # 조인트)을 실행할 컨트롤러 매핑.
++  gripper_group_controller:
++    type: FollowJointTrajectory
++    action_ns: follow_joint_trajectory
++    default: true
++    joints:
++      - gripper_controller
+\ No newline at end of file
+diff --git a/mycobot_280/mycobot_280_moveit2/config/ros2_controllers.yaml b/mycobot_280/mycobot_280_moveit2/config/ros2_controllers.yaml
+index 429bc5e..5db523a 100644
+--- a/mycobot_280/mycobot_280_moveit2/config/ros2_controllers.yaml
++++ b/mycobot_280/mycobot_280_moveit2/config/ros2_controllers.yaml
+@@ -6,6 +6,13 @@ controller_manager:
+     arm_group_controller:
+       type: joint_trajectory_controller/JointTrajectoryController
+ 
++    # [2026-07-27, 그리퍼 actuation 1단계] gripper_controller 조인트(URDF
++    # firefighter.ros2_control.xacro에 이미 command/state interface 등록돼
++    # 있음, 나머지 5개 손가락은 mimic이라 별도 컨트롤러 불필요)를 위한
++    # 컨트롤러. 이게 없으면 MoveIt이 "gripper" 그룹 궤적을 실행할 컨트롤러를
++    # 못 찾아 트라젝토리 실행 자체가 실패함.
++    gripper_group_controller:
++      type: joint_trajectory_controller/JointTrajectoryController
+ 
+     joint_state_broadcaster:
+       type: joint_state_broadcaster/JointStateBroadcaster
+@@ -21,6 +28,16 @@ arm_group_controller:
+       - joint6output_to_joint6
+     command_interfaces:
+       - position
++    state_interfaces:
++      - position
++      - velocity
++
++gripper_group_controller:
++  ros__parameters:
++    joints:
++      - gripper_controller
++    command_interfaces:
++      - position
+     state_interfaces:
+       - position
+       - velocity
+\ No newline at end of file
+diff --git a/mycobot_280/mycobot_280_moveit2/config/sensors_3d.yaml b/mycobot_280/mycobot_280_moveit2/config/sensors_3d.yaml
+index ad914d0..cf65cce 100644
+--- a/mycobot_280/mycobot_280_moveit2/config/sensors_3d.yaml
++++ b/mycobot_280/mycobot_280_moveit2/config/sensors_3d.yaml
+@@ -5,12 +5,31 @@ sensors:
+   - d435_pointcloud
+ d435_pointcloud:
+   sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+-  point_cloud_topic: /camera/camera/depth/color/points
++  # raw 토픽(/camera/camera/depth/color/points)이 아니라
++  # pointcloud_tomato_filter_node(mycobot_280_pick)가 YOLO bbox로 토마토
++  # 영역 포인트를 미리 제거해 발행하는 토픽을 구독함 — 토마토 자체가
++  # Octomap 장애물로 잡히는 문제를 pointcloud 단계에서 사전 차단
++  # (로드맵 2단계, docs/obstacle_avoidance_manual_test.md 참고). 이 필터
++  # 노드가 안 떠 있으면 이 토픽에 아무것도 발행되지 않아 Octomap이 비게
++  # 되므로, demo_octomap.launch.py가 이 노드를 항상 같이 띄움(무해한
++  # pass-through 기본 동작).
++  point_cloud_topic: /camera/camera/depth/color/points_filtered
+   max_range: 2.0
+   point_subsample: 1
+-  padding_offset: 0.02
+-  # 1.0(기본값)에서는 자기 몸 필터가 카메라 근처 실제 물체(벽 등)까지
+-  # 과도하게 걸러내는 문제가 있어서 0.7로 낮춤 (실측으로 확인).
+-  padding_scale: 0.7
++  # 2026-07-23: 그리퍼 URDF 추가 이후, 자기 몸 필터가 실제 그리퍼(특히
++  # 손가락 끝, flange 기준 ~70~110mm)를 완전히는 못 덮어서 카메라가 자기
++  # 그리퍼를 장애물(octomap voxel)로 오인하는 현상 발견. padding_scale을
++  # 1.0 이상(1.3, 1.05 등)으로 올려서 그리퍼는 안 잡히게 했더니 이번엔
++  # 반대로 실제 물체(target 등)까지 과도하게 필터링되는 문제가 있었음
++  # (RViz 육안 확인 기준 — 바이트 수 등 간접 지표는 신뢰 못 함, octomap
++  # 메시지가 표준 .ot/.bt 파일 헤더 형식이 아니라서 파이썬으로 직접
++  # 디코딩도 실패함). 최종적으로 사용자가 RViz로 직접 확인하며 조정한
++  # 값(0.92/0.0)을 채택 — 실제 물체는 정상적으로 잡히고, 그리퍼 근처에
++  # 잔여 voxel이 1개 정도 남는 수준까지 타협. 이 잔여분은
++  # `coord_to_goal_node`가 플래닝 직전 자동 호출하는 `/clear_octomap`으로
++  # 처리(완벽한 self-filter보다 실용적 타협 — `obstacle_avoidance_manual_test.md`
++  # "알려진 문제" 참고).
++  padding_offset: 0.00
++  padding_scale: 0.92
+   max_update_rate: 1.0
+   filtered_cloud_topic: filtered_cloud
+diff --git a/mycobot_280/mycobot_280_moveit2/launch/demo_octomap.launch.py b/mycobot_280/mycobot_280_moveit2/launch/demo_octomap.launch.py
+index f56295a..b522860 100644
+--- a/mycobot_280/mycobot_280_moveit2/launch/demo_octomap.launch.py
++++ b/mycobot_280/mycobot_280_moveit2/launch/demo_octomap.launch.py
+@@ -20,23 +20,49 @@ robot_effector_frame=joint6으로 진행함 (docs 13장).
+ 사용법:
+   ros2 launch mycobot_280_moveit2 demo_octomap.launch.py
+   (캘리브레이션 이름을 바꾸고 싶으면: handeye_calibration_name:=<이름>)
++
++[2026-07-27] `enable_octomap:=false`로 Octomap 장애물 회피 파이프라인
++(occupancy_map_monitor + pointcloud_tomato_filter_node)을 통째로 건너뛸 수
++있음 — 그리퍼 근접거리 self-filter 잔여 voxel로 인한 간헐적
++`START_STATE_IN_COLLISION`(`docs/obstacle_avoidance_manual_test.md` "알려진
++문제" 참고, 아직 미해결인 별도 로드맵 항목)이 harvest 파이프라인 자체
++검증을 자꾸 막을 때, 장애물 회피는 잠시 포기하고 검출->좌표계산->파지
++경로만 먼저 끝까지 확인하고 싶은 경우에 사용. D435 카메라/handeye 발행은
++그대로 유지되므로 YOLO 검출/좌표 변환은 정상 동작함 — 다만 이 모드에서는
++실제 장애물(사람 손 등)을 MoveIt이 전혀 못 보므로 팔 주변 안전을 사람이
++직접 확인해야 함.
+ """
+ 
+ from launch import LaunchDescription
+-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
++from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+ from launch.launch_description_sources import PythonLaunchDescriptionSource
+ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
++from launch_ros.actions import Node
+ from launch_ros.substitutions import FindPackageShare
+ from moveit_configs_utils import MoveItConfigsBuilder
+ from moveit_configs_utils.launches import generate_demo_launch
+ 
+ 
+-def generate_launch_description():
+-    moveit_config = (
+-        MoveItConfigsBuilder("firefighter", package_name="mycobot_280_moveit2")
+-        .sensors_3d()
+-        .to_moveit_configs()
++def _launch_setup(context, *args, **kwargs):
++    # MoveItConfigsBuilder에 .sensors_3d()를 붙이느냐 마느냐는 move_group에
++    # 넘길 파라미터 자체가 달라지는 문제라 런타임 IfCondition으로는 못 가르고
++    # (액션을 조건부로 켜고 끄는 것과 달리, 여기선 Python 객체 자체가 갈림)
++    # 여기서 실제 문자열 값을 확정해 분기해야 함.
++    enable_octomap = (
++        LaunchConfiguration("enable_octomap").perform(context).lower() == "true"
++    )
++    enable_camera = (
++        LaunchConfiguration("enable_camera").perform(context).lower() == "true"
+     )
++    enable_pointcloud_filter = (
++        LaunchConfiguration("enable_pointcloud_filter").perform(context).lower()
++        == "true"
++    )
++
++    builder = MoveItConfigsBuilder("firefighter", package_name="mycobot_280_moveit2")
++    if enable_octomap:
++        builder = builder.sensors_3d()
++    moveit_config = builder.to_moveit_configs()
+ 
+     ld = generate_demo_launch(moveit_config)
+ 
+@@ -44,8 +70,8 @@ def generate_launch_description():
+     # easy_handeye2의 handeye_publisher가 ~/.ros2/easy_handeye2/calibrations/
+     # <name>.calib 파일을 읽어서 StaticTransformBroadcaster로 그대로 발행함.
+     # robot_effector_frame(joint6)에 얹히므로 로봇 자세가 바뀌어도 항상 유효 —
+-    # 더 이상 관절 각도별로 좌표를 수동 계산/입력할 필요 없음.
+-    ld.add_action(DeclareLaunchArgument("handeye_calibration_name", default_value="mycobot_d435_eih"))
++    # 더 이상 관절 각도별로 좌표를 수동 계산/입력할 필요 없음. enable_octomap
++    # 값과 무관하게 항상 필요(YOLO 검출 좌표를 g_base로 변환하는 데 씀).
+     ld.add_action(
+         IncludeLaunchDescription(
+             PythonLaunchDescriptionSource(
+@@ -59,21 +85,117 @@ def generate_launch_description():
+         )
+     )
+ 
+-    # ---- D435 카메라 (ROS2 wrapper, 컬러-뎁스 정렬된 포인트클라우드 발행) ----
+-    ld.add_action(
+-        IncludeLaunchDescription(
+-            PythonLaunchDescriptionSource(
+-                [
+-                    "/opt/ros/jazzy/share/realsense2_camera/launch/rs_launch.py"
+-                ]
+-            ),
+-            launch_arguments={
+-                "pointcloud.enable": "true",
+-                "align_depth.enable": "true",
+-                "depth_module.depth_profile": "640x480x30",
+-                "rgb_camera.color_profile": "640x480x30",
+-            }.items(),
++    # ---- D435 카메라 (ROS2 wrapper) ----
++    # enable_octomap 값과 무관하게 항상 필요(YOLO 검출용).
++    # [2026-07-28] pointcloud.enable을 false로 변경 — realsense가 직접
++    # 발행하는 raw pointcloud(depth 센서 고유 그리드)는 이제 아무도 구독하지
++    # 않음. pointcloud_tomato_filter_node가 2026-07-24에 이 raw pointcloud를
++    # 쓰다가 YOLO bbox(컬러 픽셀 좌표)와 그리드가 안 맞는 문제를 발견하고
++    # aligned_depth_to_color 기반 자체 변환으로 이미 갈아탔음(그 노드 파일
++    # 상단 주석 참고), sensors_3d.yaml의 occupancy_map_monitor도 그 필터
++    # 노드의 출력(points_filtered)만 구독함 — raw pointcloud는 realsense
++    # 드라이버 CPU만 소모하는 죽은 설정이었음(실측: realsense2_camera_node
++    # 단독 CPU 100%+ 관측, so101-ros-physical-ai 자매 프로젝트는 애초에 이
++    # 옵션을 안 켜서 같은 D435로도 부하가 훨씬 낮았음).
++    #
++    # [2026-07-31] enable_camera로 건너뛸 수 있게 함. rosbag 재생 세션에서는
++    # 카메라 토픽을 bag이 공급하므로 드라이버가 있으면 **같은 토픽에 발행자가
++    # 둘**이 되고, 애초에 집(노트북)에는 D435가 없어서 드라이버가 오류를 뱉으며
++    # 죽는다. scene_replay.launch.py가 false로 준다.
++    if enable_camera:
++        ld.add_action(
++            IncludeLaunchDescription(
++                PythonLaunchDescriptionSource(
++                    [
++                        "/opt/ros/jazzy/share/realsense2_camera/launch/rs_launch.py"
++                    ]
++                ),
++                launch_arguments={
++                    "pointcloud.enable": "false",
++                    "align_depth.enable": "true",
++                    "depth_module.depth_profile": "640x480x30",
++                    "rgb_camera.color_profile": "640x480x30",
++                }.items(),
++            )
+         )
+-    )
+ 
+-    return ld
++    # ---- 토마토 pointcloud 사전 필터 (로드맵 2단계) ----
++    # aligned_depth_to_color(image_raw + camera_info)를 직접 구독해 픽셀->3D
++    # 변환을 스스로 수행하는 노드(realsense의 raw pointcloud는 depth 센서
++    # 고유 그리드라 YOLO bbox(컬러 픽셀 좌표)와 정렬이 안 맞아서 안 씀 — 노드
++    # 파일 상단 주석 참고). yolo_d435_detector_node(mycobot_280_pick,
++    # pick_pipeline.launch.py가 얹음)가 'tomato_boxes'에 검출 bbox를 발행하면,
++    # 그 영역의 depth를 제거한 pointcloud를 occupancy_map_monitor(아래
++    # sensors_3d.yaml)에 공급함 — 토마토 자체가 Octomap 장애물로 잡히지 않게
++    # 하는 사전 차단. enable_octomap=false면 occupancy_map_monitor 자체가
++    # 없어서 이 노드의 출력을 아무도 안 쓰므로 같이 건너뜀.
++    #
++    # [2026-07-31] enable_pointcloud_filter로 이 노드만 따로 끌 수 있게 함.
++    # 재생 세션에서는 같은 노드를 restamp_now:=true로 직접 띄워야 하는데(재생본의
++    # header.stamp가 수십 분 과거라 그대로 두면 tf2 버퍼를 벗어난다, 6.5절 함정 6),
++    # 여기서 기본 파라미터로 하나가 자동으로 떠 버리면 points_filtered에 발행자가
++    # 둘이 된다 — 실제로 겪었다. occupancy_map_monitor(octomap 본체)는 켜 두고
++    # 이 노드만 빼는 조합이 필요해서 플래그를 분리했다.
++    if enable_octomap and enable_pointcloud_filter:
++        ld.add_action(
++            Node(
++                package="mycobot_280_pick",
++                executable="pointcloud_tomato_filter_node",
++                name="pointcloud_tomato_filter_node",
++            )
++        )
++
++    return [ld]
++
++
++def generate_launch_description():
++    return LaunchDescription([
++        DeclareLaunchArgument("handeye_calibration_name", default_value="mycobot_d435_eih"),
++        DeclareLaunchArgument(
++            "enable_octomap",
++            default_value="true",
++            description=(
++                "false면 Octomap 장애물 회피 파이프라인(occupancy_map_monitor+"
++                "pointcloud_tomato_filter_node)을 통째로 건너뜀 — harvest 파이프라인"
++                "(검출->좌표계산->파지)만 먼저 검증하고 싶을 때 사용. 이 모드에서는 "
++                "MoveIt이 실제 장애물을 전혀 못 보니 사람이 직접 안전 확인할 것."
++            ),
++        ),
++        # [2026-07-31] use_rviz 자체는 moveit_configs_utils의 generate_demo_launch가
++        # 이미 선언하지만, 그건 _launch_setup(OpaqueFunction) **안쪽**에서 만들어지는
++        # LaunchDescription이라 최상위 인자 목록에 안 잡힌다. 그래서 명령줄에
++        # use_rviz:=false를 주면 "Parameter 'use_rviz' is not supported" 경고만 뜨고
++        # RViz가 그대로 떴다(실제로 확인함). 여기서 같은 이름으로 한 번 더 선언해
++        # 두면 CLI 값이 컨텍스트에 먼저 들어가고, 안쪽 DeclareLaunchArgument는 이미
++        # 설정된 값을 덮어쓰지 않으므로 의도대로 동작한다.
++        #
++        # 쓰임새: rosbag 재생 확인처럼 MoveIt 기본 RViz 대신 전용 설정
++        # (src/mycobot_280_pick/config/scene_replay.rviz)을 띄우고 싶을 때, 창이
++        # 두 개 뜨는 걸 막는다.
++        DeclareLaunchArgument(
++            "enable_camera",
++            default_value="true",
++            description=(
++                "false면 realsense2_camera를 띄우지 않음 — rosbag 재생 세션처럼 "
++                "카메라 토픽을 bag이 공급하는 경우(발행자 이중화 방지) 또는 "
++                "D435가 아예 없는 장비에서 사용."
++            ),
++        ),
++        DeclareLaunchArgument(
++            "enable_pointcloud_filter",
++            default_value="true",
++            description=(
++                "false면 pointcloud_tomato_filter_node를 띄우지 않음(octomap 본체는 "
++                "유지) — 재생 세션에서 restamp_now:=true로 직접 띄울 때 중복 방지."
++            ),
++        ),
++        DeclareLaunchArgument(
++            "use_rviz",
++            default_value="true",
++            description=(
++                "false면 MoveIt 기본 RViz를 띄우지 않음 — 별도 RViz 설정을 직접 "
++                "띄울 때 창 중복을 피하려는 용도."
++            ),
++        ),
++        OpaqueFunction(function=_launch_setup),
++    ])
+diff --git a/mycobot_280/mycobot_280_moveit2/launch/handeye_calibration.launch.py b/mycobot_280/mycobot_280_moveit2/launch/handeye_calibration.launch.py
+index 757da73..6eba982 100644
+--- a/mycobot_280/mycobot_280_moveit2/launch/handeye_calibration.launch.py
++++ b/mycobot_280/mycobot_280_moveit2/launch/handeye_calibration.launch.py
+@@ -7,11 +7,13 @@ demo_octomap.launch.py와 달리 시뮬레이션(FakeSystem) 스택을 쓰지 
+ RPi(jetcobot)에서 별도로 실행하는 follow_display 노드가 네트워크로
+ 발행해주는 것을 그대로 구독함 (같은 ROS_DOMAIN_ID면 위치 무관하게 동작).
+ 
+-실행 전 준비물 (자세한 절차는 docs/Moveit2 setup record.md 13장 참고):
+-  1. RPi(jetcobot)에서 실제 로봇 관절 각도를 /joint_states로 발행:
+-       ros2 run mycobot_280jn follow_display --ros-args \
+-         -p port:=/dev/ttyJETCOBOT -p baud:=1000000
+-     (서보 릴리즈 상태로 두고, 이후 손으로 자세를 잡아가며 샘플을 찍음)
++실행 전 준비물 (자세한 절차는 docs/Moveit2 setup record.md 13장/15장 참고):
++  1. RPi(jetcobot_126b)에서 실제 로봇 관절 각도를 /joint_states로 발행
++     (SBC가 Raspberry Pi 5라 mycobot_280jn이 아니라 mycobot_280pi,
++     포트는 /dev/ttyUSB0 — 2026-07-23 확인):
++       ros2 run mycobot_280pi follow_display --ros-args \
++         -p port:=/dev/ttyUSB0 -p baud:=1000000
++     (이 노드가 시작 시 자동으로 release_all_servos() 호출 — 별도 릴리즈 불필요)
+   2. g_base 기준으로 고정된 위치에 ArUco 마커를 하나 인쇄해서 부착:
+        ros2 run aruco_opencv create_marker 0
+      출력된 "Marker side size"(미터 단위)를 marker_size 인자로 그대로 넣을 것.
+diff --git a/mycobot_280/mycobot_280_rdkx5/setup.cfg b/mycobot_280/mycobot_280_rdkx5/setup.cfg
+index 6c7b795..f4b3600 100644
+--- a/mycobot_280/mycobot_280_rdkx5/setup.cfg
++++ b/mycobot_280/mycobot_280_rdkx5/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_280_rdkx5
++script_dir=$base/lib/mycobot_280_rdkx5
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_280_rdkx5
++install_scripts=$base/lib/mycobot_280_rdkx5
+diff --git a/mycobot_280/mycobot_280_riscv/setup.cfg b/mycobot_280/mycobot_280_riscv/setup.cfg
+index 3ed8111..4136bd1 100644
+--- a/mycobot_280/mycobot_280_riscv/setup.cfg
++++ b/mycobot_280/mycobot_280_riscv/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_280_riscv
++script_dir=$base/lib/mycobot_280_riscv
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_280_riscv
++install_scripts=$base/lib/mycobot_280_riscv
+diff --git a/mycobot_280/mycobot_280_x3pi/setup.cfg b/mycobot_280/mycobot_280_x3pi/setup.cfg
+index e700243..7dce470 100644
+--- a/mycobot_280/mycobot_280_x3pi/setup.cfg
++++ b/mycobot_280/mycobot_280_x3pi/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_280_x3pi
++script_dir=$base/lib/mycobot_280_x3pi
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_280_x3pi
++install_scripts=$base/lib/mycobot_280_x3pi
+diff --git a/mycobot_280/mycobot_280jn/mycobot_280jn/follow_display.py b/mycobot_280/mycobot_280jn/mycobot_280jn/follow_display.py
+index a8e0326..43a3196 100644
+--- a/mycobot_280/mycobot_280jn/mycobot_280jn/follow_display.py
++++ b/mycobot_280/mycobot_280jn/mycobot_280jn/follow_display.py
+@@ -62,6 +62,12 @@ class Talker(Node):
+             "joint5_to_joint4",
+             "joint6_to_joint5",
+             "joint6output_to_joint6",
++            # adaptive gripper 마스터 조인트. 이 노드는 실제 그리퍼 값을 읽지
++            # 않고 고정값만 발행 — 값이 없으면 robot_state_publisher가
++            # mimic 조인트(손가락 6개)의 위치를 계산 못 해 RViz에 안 그려짐.
++            # 실제 그리퍼 상태를 반영하려면 pymycobot의 그리퍼 조회 API로
++            # 교체 필요(하드웨어 배선/API 버전 확인 후).
++            "gripper_controller",
+         ]
+         joint_state_send.velocity = [0.0, ]
+         joint_state_send.effort = []
+@@ -78,6 +84,8 @@ class Talker(Node):
+                 data_list = []
+                 for _, value in enumerate(angles):
+                     data_list.append(value)
++                # gripper_controller 고정값(라디안). URDF 조인트 리밋 -0.74~0.15 안의 값.
++                data_list.append(0.0)
+ 
+                 #self.get_logger().info('angles: {}'.format([round(math.degrees(angle), 2) for angle in data_list]))
+                 joint_state_send.position = data_list
+diff --git a/mycobot_280/mycobot_280jn/setup.cfg b/mycobot_280/mycobot_280jn/setup.cfg
+index 0012bd4..4402133 100644
+--- a/mycobot_280/mycobot_280jn/setup.cfg
++++ b/mycobot_280/mycobot_280jn/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_280jn
++script_dir=$base/lib/mycobot_280jn
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_280jn
++install_scripts=$base/lib/mycobot_280jn
+diff --git a/mycobot_280/mycobot_280pi/setup.cfg b/mycobot_280/mycobot_280pi/setup.cfg
+index 1082c98..49ecf8b 100644
+--- a/mycobot_280/mycobot_280pi/setup.cfg
++++ b/mycobot_280/mycobot_280pi/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_280pi
++script_dir=$base/lib/mycobot_280pi
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_280pi
++install_scripts=$base/lib/mycobot_280pi
+diff --git a/mycobot_320/mycobot_320/setup.cfg b/mycobot_320/mycobot_320/setup.cfg
+index 7fd7817..ae2e301 100644
+--- a/mycobot_320/mycobot_320/setup.cfg
++++ b/mycobot_320/mycobot_320/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_320
++script_dir=$base/lib/mycobot_320
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_320
++install_scripts=$base/lib/mycobot_320
+diff --git a/mycobot_320/mycobot_320_riscv/setup.cfg b/mycobot_320/mycobot_320_riscv/setup.cfg
+index 5092071..698aca3 100644
+--- a/mycobot_320/mycobot_320_riscv/setup.cfg
++++ b/mycobot_320/mycobot_320_riscv/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_320_riscv
++script_dir=$base/lib/mycobot_320_riscv
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_320_riscv
++install_scripts=$base/lib/mycobot_320_riscv
+diff --git a/mycobot_320/mycobot_320pi/setup.cfg b/mycobot_320/mycobot_320pi/setup.cfg
+index d4a9051..652b64e 100644
+--- a/mycobot_320/mycobot_320pi/setup.cfg
++++ b/mycobot_320/mycobot_320pi/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_320pi
++script_dir=$base/lib/mycobot_320pi
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_320pi
++install_scripts=$base/lib/mycobot_320pi
+diff --git a/mycobot_description/setup.cfg b/mycobot_description/setup.cfg
+index 7c320d6..0e2e073 100644
+--- a/mycobot_description/setup.cfg
++++ b/mycobot_description/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_description
++script_dir=$base/lib/mycobot_description
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_description
++install_scripts=$base/lib/mycobot_description
+diff --git a/mycobot_description/urdf/mycobot_280_m5/mycobot_280_m5_adaptive_gripper.urdf b/mycobot_description/urdf/mycobot_280_m5/mycobot_280_m5_adaptive_gripper.urdf
+index 32a6ce3..0521065 100644
+--- a/mycobot_description/urdf/mycobot_280_m5/mycobot_280_m5_adaptive_gripper.urdf
++++ b/mycobot_description/urdf/mycobot_280_m5/mycobot_280_m5_adaptive_gripper.urdf
+@@ -206,8 +206,18 @@
+     <limit effort = "1000.0" lower = "-3.14" upper = "3.14159" velocity = "0"/> -->
+     <parent link="joint6_flange"/>
+     <child link="gripper_base"/>
+-    <!-- <origin xyz= "0 0.0 0" rpy = "-1.5708 0 0"/>   -->
+-    <origin xyz= "0 0 0.034" rpy = "1.579 0 0"/>  
++    <!-- [2026-07-27] 실물이 상하 뒤집혀 보이는 문제를 처음엔 roll 180도
++         반전으로 착각해 rpy="-1.579 0 0"로 바꿨었으나, 그건 틀린 축이었음
++         (제조사 원본 "1.579 0 0"으로 되돌림, 위 커밋 이력 참고). 이후
++         사용자가 실물 TF와 RViz를 직접 대조해서 축을 재확인함:
++         gripper_base 로컬 좌표계 기준 전방=+Y, 우측=+X, 상단=+Z로 렌더링
++         되고 있었는데 실물과 맞추려면 **gripper_base 자신의 로컬 +Y축(전방)을
++         회전축으로 180도 롤**해야 함(전방=+Y는 유지, 우측(+X)->좌측,
++         상단(+Z)->하단으로 뒤집힘). 제조사 원본 회전(Rx(1.579))에 이
++         로컬 Y축 180도 회전을 합성(post-multiply)한 결과가 아래 단일
++         rpy 값(roll=pi-1.579, pitch=0, yaw=pi) — 계산 과정은
++         docs/obstacle_avoidance_manual_test.md 참고. -->
++    <origin xyz= "0 0 0.034" rpy = "1.562593 0 3.141593"/>
+   </joint>
+ 
+   <link name="gripper_base">
+@@ -219,7 +229,7 @@
+     </visual>
+     <collision>
+       <geometry>
+-       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_base.dae"/>
++       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_base.dae" scale="0.001 0.001 0.001"/>
+       </geometry>
+     <origin xyz = "0.0 0 -0.012 " rpy = " 0 0 0"/>
+     </collision>
+@@ -234,7 +244,7 @@
+     </visual>
+     <collision>
+       <geometry>
+-       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_left1.dae"/>
++       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_left1.dae" scale="0.001 0.001 0.001"/>
+       </geometry>
+         <origin xyz = "0.039 -0.0133 -0.012 " rpy = " 0 0 0"/>
+     </collision>
+@@ -249,7 +259,7 @@
+     </visual>
+     <collision>
+       <geometry>
+-       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_left2.dae"/>
++       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_left2.dae" scale="0.001 0.001 0.001"/>
+       </geometry>
+         <origin xyz = "0.005 -0.0195 -0.012 " rpy = " 0 0 0"/>
+     </collision>
+@@ -264,7 +274,7 @@
+     </visual>
+     <collision>
+       <geometry>
+-       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_left3.dae"/>
++       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_left3.dae" scale="0.001 0.001 0.001"/>
+       </geometry>
+     <origin xyz = "0.012 0.0025 -0.012 " rpy = " 0 0 0"/>
+     </collision>
+@@ -279,7 +289,7 @@
+     </visual>
+     <collision>
+       <geometry>
+-       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_right1.dae"/>
++       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_right1.dae" scale="0.001 0.001 0.001"/>
+       </geometry>
+         <origin xyz = "-0.039 -0.0133 -0.012 " rpy = " 0 0 0"/>
+     </collision>
+@@ -294,7 +304,7 @@
+     </visual>
+     <collision>
+       <geometry>
+-       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_right2.dae"/>
++       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_right2.dae" scale="0.001 0.001 0.001"/>
+       </geometry>
+         <origin xyz = "-0.005 -0.0195 -0.012 " rpy = " 0 0 0"/>
+     </collision>
+@@ -309,7 +319,7 @@
+     </visual>
+     <collision>
+       <geometry>
+-       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_right3.dae"/>
++       <mesh filename="package://mycobot_description/urdf/adaptive_gripper/gripper_right3.dae" scale="0.001 0.001 0.001"/>
+       </geometry>
+     <origin xyz = "-0.012 0.0025 -0.012" rpy = " 0 0 0"/>
+     </collision>
+diff --git a/mycobot_pro/mycobot_600/setup.cfg b/mycobot_pro/mycobot_600/setup.cfg
+index 12f8e40..636de5a 100644
+--- a/mycobot_pro/mycobot_600/setup.cfg
++++ b/mycobot_pro/mycobot_600/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_600
++script_dir=$base/lib/mycobot_600
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_600
++install_scripts=$base/lib/mycobot_600
+diff --git a/mycobot_pro/mycobot_630/setup.cfg b/mycobot_pro/mycobot_630/setup.cfg
+index 1f635a5..6d2eeef 100644
+--- a/mycobot_pro/mycobot_630/setup.cfg
++++ b/mycobot_pro/mycobot_630/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_630
++script_dir=$base/lib/mycobot_630
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_630
++install_scripts=$base/lib/mycobot_630
+diff --git a/mycobot_pro/mycobot_pro_450/setup.cfg b/mycobot_pro/mycobot_pro_450/setup.cfg
+index d46806a..9f9c2c8 100644
+--- a/mycobot_pro/mycobot_pro_450/setup.cfg
++++ b/mycobot_pro/mycobot_pro_450/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mycobot_pro_450
++script_dir=$base/lib/mycobot_pro_450
+ 
+ [install]
+-install-scripts=$base/lib/mycobot_pro_450
++install_scripts=$base/lib/mycobot_pro_450
+diff --git a/mypalletizer_260/mypalletizer_260/setup.cfg b/mypalletizer_260/mypalletizer_260/setup.cfg
+index 15f62e7..908723e 100644
+--- a/mypalletizer_260/mypalletizer_260/setup.cfg
++++ b/mypalletizer_260/mypalletizer_260/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mypalletizer_260
++script_dir=$base/lib/mypalletizer_260
+ 
+ [install]
+-install-scripts=$base/lib/mypalletizer_260
++install_scripts=$base/lib/mypalletizer_260
+diff --git a/mypalletizer_260/mypalletizer_260_pi/setup.cfg b/mypalletizer_260/mypalletizer_260_pi/setup.cfg
+index 068e2a7..23aa18f 100644
+--- a/mypalletizer_260/mypalletizer_260_pi/setup.cfg
++++ b/mypalletizer_260/mypalletizer_260_pi/setup.cfg
+@@ -1,6 +1,6 @@
+ 
+ [develop]
+-script-dir=$base/lib/mypalletizer_260_pi
++script_dir=$base/lib/mypalletizer_260_pi
+ 
+ [install]
+-install-scripts=$base/lib/mypalletizer_260_pi
++install_scripts=$base/lib/mypalletizer_260_pi

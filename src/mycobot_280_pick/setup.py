@@ -1,3 +1,5 @@
+import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'mycobot_280_pick'
@@ -10,6 +12,10 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/launch', glob.glob('launch/*.launch.py')),
+        # [2026-07-31] scene_replay.launch.py가 FindPackageShare로 RViz 설정을
+        # 찾으므로 설치 대상에 포함해야 한다.
+        ('share/' + package_name + '/config', glob.glob('config/*.rviz')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -26,6 +32,9 @@ setup(
         'console_scripts': [
             'coord_to_goal_node = mycobot_280_pick.coord_to_goal_node:main',
             'yolo_d435_detector_node = mycobot_280_pick.yolo_d435_detector_node:main',
+            'pointcloud_tomato_filter_node = mycobot_280_pick.pointcloud_tomato_filter_node:main',
+            'harvest_sequence_node = mycobot_280_pick.harvest_sequence_node:main',
+            'rviz_control_panel_node = mycobot_280_pick.rviz_control_panel_node:main',
         ],
     },
 )

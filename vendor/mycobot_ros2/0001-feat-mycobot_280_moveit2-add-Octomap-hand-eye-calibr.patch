@@ -1,0 +1,363 @@
+From c70310c1a9dace419a68c4bcd89ba0bc7b6a40a0 Mon Sep 17 00:00:00 2001
+From: minodori <minodori@gmail.com>
+Date: Thu, 16 Jul 2026 00:10:15 +0900
+Subject: [PATCH 1/3] feat(mycobot_280_moveit2): add Octomap + hand-eye
+ calibration integration
+
+D435 point cloud now feeds MoveIt2's Octomap for real collision avoidance,
+with the camera->joint6 transform provided by an easy_handeye2 eye-in-hand
+calibration (previously a manually FK-computed static transform that had
+to be recomputed for every arm pose).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../config/sensors_3d.yaml                    |  16 ++
+ .../launch/demo_octomap.launch.py             |  79 ++++++++++
+ .../launch/handeye_calibration.launch.py      | 141 ++++++++++++++++++
+ .../launch/move_group.launch.py               |  78 +++++++++-
+ 4 files changed, 311 insertions(+), 3 deletions(-)
+ create mode 100644 mycobot_280/mycobot_280_moveit2/config/sensors_3d.yaml
+ create mode 100644 mycobot_280/mycobot_280_moveit2/launch/demo_octomap.launch.py
+ create mode 100644 mycobot_280/mycobot_280_moveit2/launch/handeye_calibration.launch.py
+
+diff --git a/mycobot_280/mycobot_280_moveit2/config/sensors_3d.yaml b/mycobot_280/mycobot_280_moveit2/config/sensors_3d.yaml
+new file mode 100644
+index 0000000..ad914d0
+--- /dev/null
++++ b/mycobot_280/mycobot_280_moveit2/config/sensors_3d.yaml
+@@ -0,0 +1,16 @@
++# D435 포인트클라우드를 Octomap으로 등록하기 위한 설정.
++# joint6 -> camera_link는 easy_handeye2 캘리브레이션 결과로 발행됨
++# (demo_octomap.launch.py, docs 13장 참고).
++sensors:
++  - d435_pointcloud
++d435_pointcloud:
++  sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
++  point_cloud_topic: /camera/camera/depth/color/points
++  max_range: 2.0
++  point_subsample: 1
++  padding_offset: 0.02
++  # 1.0(기본값)에서는 자기 몸 필터가 카메라 근처 실제 물체(벽 등)까지
++  # 과도하게 걸러내는 문제가 있어서 0.7로 낮춤 (실측으로 확인).
++  padding_scale: 0.7
++  max_update_rate: 1.0
++  filtered_cloud_topic: filtered_cloud
+diff --git a/mycobot_280/mycobot_280_moveit2/launch/demo_octomap.launch.py b/mycobot_280/mycobot_280_moveit2/launch/demo_octomap.launch.py
+new file mode 100644
+index 0000000..f56295a
+--- /dev/null
++++ b/mycobot_280/mycobot_280_moveit2/launch/demo_octomap.launch.py
+@@ -0,0 +1,79 @@
++"""
++Octomap 연동 테스트용 launch 파일.
++
++demo.launch.py(시뮬레이션 전체 스택, sensors_3d.yaml이 반영된
++move_group.launch.py 포함)에 D435(realsense2_camera)와, 카메라->joint6
++변환(핸드-아이 캘리브레이션 결과)을 추가로 띄움.
++
++이전에는 카메라->g_base를 수동 FK로 계산해서 고정값으로 넣어뒀었는데
++(관절 각도가 바뀔 때마다 재계산 필요, 실측 대비 위치 6.3cm/회전 13.5도
++오차 있었음 — docs 13장 "캘리브레이션 전후 비교" 참고), 이제
++`easy_handeye2`로 핸드-아이 캘리브레이션을 마쳐서 joint6->camera_link
++고정 변환을 정확히 알고 있음. 이 변환은 로봇 자세와 무관하게 항상
++유효하므로(joint6에 실시간 TF로 얹힘), 더 이상 관절 각도별로 좌표를
++수동 입력할 필요가 없음.
++
++카메라는 joint6_flange(그리퍼, J6에 따라 회전)가 아니라 **joint6 링크
++자체**(J6 회전과 무관한 고정 부분)에 마운트되어 있음 — 그래서 캘리브레이션도
++robot_effector_frame=joint6으로 진행함 (docs 13장).
++
++사용법:
++  ros2 launch mycobot_280_moveit2 demo_octomap.launch.py
++  (캘리브레이션 이름을 바꾸고 싶으면: handeye_calibration_name:=<이름>)
++"""
++
++from launch import LaunchDescription
++from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
++from launch.launch_description_sources import PythonLaunchDescriptionSource
++from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
++from launch_ros.substitutions import FindPackageShare
++from moveit_configs_utils import MoveItConfigsBuilder
++from moveit_configs_utils.launches import generate_demo_launch
++
++
++def generate_launch_description():
++    moveit_config = (
++        MoveItConfigsBuilder("firefighter", package_name="mycobot_280_moveit2")
++        .sensors_3d()
++        .to_moveit_configs()
++    )
++
++    ld = generate_demo_launch(moveit_config)
++
++    # ---- joint6 -> camera_link (핸드-아이 캘리브레이션 결과, docs 13장) ----
++    # easy_handeye2의 handeye_publisher가 ~/.ros2/easy_handeye2/calibrations/
++    # <name>.calib 파일을 읽어서 StaticTransformBroadcaster로 그대로 발행함.
++    # robot_effector_frame(joint6)에 얹히므로 로봇 자세가 바뀌어도 항상 유효 —
++    # 더 이상 관절 각도별로 좌표를 수동 계산/입력할 필요 없음.
++    ld.add_action(DeclareLaunchArgument("handeye_calibration_name", default_value="mycobot_d435_eih"))
++    ld.add_action(
++        IncludeLaunchDescription(
++            PythonLaunchDescriptionSource(
++                PathJoinSubstitution(
++                    [FindPackageShare("easy_handeye2"), "launch", "publish.launch.py"]
++                )
++            ),
++            launch_arguments={
++                "name": LaunchConfiguration("handeye_calibration_name"),
++            }.items(),
++        )
++    )
++
++    # ---- D435 카메라 (ROS2 wrapper, 컬러-뎁스 정렬된 포인트클라우드 발행) ----
++    ld.add_action(
++        IncludeLaunchDescription(
++            PythonLaunchDescriptionSource(
++                [
++                    "/opt/ros/jazzy/share/realsense2_camera/launch/rs_launch.py"
++                ]
++            ),
++            launch_arguments={
++                "pointcloud.enable": "true",
++                "align_depth.enable": "true",
++                "depth_module.depth_profile": "640x480x30",
++                "rgb_camera.color_profile": "640x480x30",
++            }.items(),
++        )
++    )
++
++    return ld
+diff --git a/mycobot_280/mycobot_280_moveit2/launch/handeye_calibration.launch.py b/mycobot_280/mycobot_280_moveit2/launch/handeye_calibration.launch.py
+new file mode 100644
+index 0000000..757da73
+--- /dev/null
++++ b/mycobot_280/mycobot_280_moveit2/launch/handeye_calibration.launch.py
+@@ -0,0 +1,141 @@
++"""
++Eye-in-Hand 핸드-아이 캘리브레이션(easy_handeye2) 실행용 launch 파일.
++
++demo_octomap.launch.py와 달리 시뮬레이션(FakeSystem) 스택을 쓰지 않음 —
++캘리브레이션은 실제 로봇의 실시간 관절 각도(엔코더 값)가 필요하기 때문.
++그래서 이 launch 파일은 robot_state_publisher만 띄우고, /joint_states는
++RPi(jetcobot)에서 별도로 실행하는 follow_display 노드가 네트워크로
++발행해주는 것을 그대로 구독함 (같은 ROS_DOMAIN_ID면 위치 무관하게 동작).
++
++실행 전 준비물 (자세한 절차는 docs/Moveit2 setup record.md 13장 참고):
++  1. RPi(jetcobot)에서 실제 로봇 관절 각도를 /joint_states로 발행:
++       ros2 run mycobot_280jn follow_display --ros-args \
++         -p port:=/dev/ttyJETCOBOT -p baud:=1000000
++     (서보 릴리즈 상태로 두고, 이후 손으로 자세를 잡아가며 샘플을 찍음)
++  2. g_base 기준으로 고정된 위치에 ArUco 마커를 하나 인쇄해서 부착:
++       ros2 run aruco_opencv create_marker 0
++     출력된 "Marker side size"(미터 단위)를 marker_size 인자로 그대로 넣을 것.
++  3. 이 launch 파일 실행 (D435가 로컬 PC에 꽂혀 있는 구성 기준 —
++     realsense2_camera를 이 파일이 직접 띄움. pointcloud/depth는
++     캘리브레이션에 불필요해서 컬러 스트림만 켬):
++       ros2 launch mycobot_280_moveit2 handeye_calibration.launch.py \
++         marker_size:=0.0742
++
++캘리브레이션 절차 (rqt GUI, "Calibrate" 탭):
++  - 서보 릴리즈 상태에서 팔을 손으로 잡고, 마커가 카메라 화면에 계속 보이는
++    채로 회전 위주로(각 축 최대한 다양하게, 최소 10~15개 자세) 이동
++  - 매 자세마다 GUI의 "Take sample" 클릭 (마커 인식 안 되면 비활성화됨)
++  - 15~20개 정도 모으면 "Compute" -> 결과 확인 -> "Save" (실 좌표계 기준
++    reprojection error가 작을수록 좋음)
++  - 저장되면 ~/.ros/easy_handeye2/calibrations/<name>.yaml 에 저장됨.
++    이후 demo_octomap.launch.py의 수동 static_transform_publisher를
++    easy_handeye2의 publish.launch.py로 교체 예정.
++"""
++
++from launch import LaunchDescription
++from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
++from launch.conditions import IfCondition
++from launch.launch_description_sources import PythonLaunchDescriptionSource
++from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
++from launch_ros.actions import Node
++from launch_ros.substitutions import FindPackageShare
++from moveit_configs_utils import MoveItConfigsBuilder
++from moveit_configs_utils.launches import generate_rsp_launch
++
++
++def generate_launch_description():
++    moveit_config = (
++        MoveItConfigsBuilder("firefighter", package_name="mycobot_280_moveit2")
++        .to_moveit_configs()
++    )
++
++    ld = LaunchDescription()
++
++    ld.add_action(DeclareLaunchArgument("calibration_name", default_value="mycobot_d435_eih"))
++    ld.add_action(DeclareLaunchArgument("robot_base_frame", default_value="g_base"))
++    # 카메라는 joint6_flange(그리퍼, J6 회전 영향)가 아니라 joint6 링크 자체에
++    # 고정되어 있음 (Octomap static transform 작업 때 실측으로 확인한 내용).
++    ld.add_action(DeclareLaunchArgument("robot_effector_frame", default_value="joint6"))
++    # camera_color_optical_frame이 아니라 camera_link(realsense 자체 TF
++    # 트리의 뿌리)로 잡아야 함. camera_color_optical_frame으로 잡으면
++    # easy_handeye2의 dummy_publisher(joint6->tracking_base_frame)가
++    # realsense가 이미 발행 중인 camera_color_frame->camera_color_optical_frame
++    # 위에 또 다른 부모를 붙이게 되어 TF 트리가 충돌함 (Octomap 작업 때
++    # camera_depth_optical_frame에 직접 붙여서 겪은 것과 같은 종류의 문제).
++    ld.add_action(DeclareLaunchArgument("tracking_base_frame", default_value="camera_link"))
++    ld.add_action(DeclareLaunchArgument("tracking_marker_frame", default_value="marker_0"))
++    ld.add_action(DeclareLaunchArgument("cam_base_topic", default_value="/camera/camera/color/image_raw"))
++    ld.add_action(DeclareLaunchArgument("marker_size", default_value="0.0742"))
++    ld.add_action(DeclareLaunchArgument("marker_dict", default_value="4X4_50"))
++    ld.add_action(DeclareLaunchArgument("launch_rviz", default_value="true"))
++
++    # ---- robot_state_publisher: 실물 로봇의 /joint_states(네트워크로 수신,
++    # RPi의 follow_display가 발행)를 그대로 TF로 변환. FakeSystem 시뮬레이션은
++    # 안 씀 (실제 관절 각도가 있어야 캘리브레이션이 의미가 있음) ----
++    for action in generate_rsp_launch(moveit_config).entities:
++        ld.add_action(action)
++
++    # ---- D435 카메라 (컬러 스트림만 — 캘리브레이션엔 depth/pointcloud
++    # 불필요, demo_octomap.launch.py와 달리 align_depth/pointcloud 안 켬) ----
++    ld.add_action(
++        IncludeLaunchDescription(
++            PythonLaunchDescriptionSource(
++                [
++                    "/opt/ros/jazzy/share/realsense2_camera/launch/rs_launch.py"
++                ]
++            ),
++            launch_arguments={
++                "pointcloud.enable": "false",
++                "align_depth.enable": "false",
++                "rgb_camera.color_profile": "640x480x30",
++                "enable_depth": "false",
++            }.items(),
++        )
++    )
++
++    # ---- ArUco 마커 검출 (카메라가 로컬이든 RPi든 상관없이 같은
++    # ROS_DOMAIN_ID면 네트워크로 image_raw/camera_info를 구독 가능) ----
++    ld.add_action(
++        Node(
++            package="aruco_opencv",
++            executable="aruco_tracker_autostart",
++            name="aruco_tracker",
++            parameters=[{
++                "cam_base_topic": LaunchConfiguration("cam_base_topic"),
++                "marker_size": LaunchConfiguration("marker_size"),
++                "marker_dict": LaunchConfiguration("marker_dict"),
++                "publish_tf": True,
++                "image_is_rectified": False,
++            }],
++        )
++    )
++
++    # ---- easy_handeye2 캘리브레이션 서버 + rqt GUI ----
++    ld.add_action(
++        IncludeLaunchDescription(
++            PythonLaunchDescriptionSource(
++                PathJoinSubstitution(
++                    [FindPackageShare("easy_handeye2"), "launch", "calibrate.launch.py"]
++                )
++            ),
++            launch_arguments={
++                "name": LaunchConfiguration("calibration_name"),
++                "calibration_type": "eye_in_hand",
++                "robot_base_frame": LaunchConfiguration("robot_base_frame"),
++                "robot_effector_frame": LaunchConfiguration("robot_effector_frame"),
++                "tracking_base_frame": LaunchConfiguration("tracking_base_frame"),
++                "tracking_marker_frame": LaunchConfiguration("tracking_marker_frame"),
++            }.items(),
++        )
++    )
++
++    ld.add_action(
++        Node(
++            package="rviz2",
++            executable="rviz2",
++            name="rviz2",
++            condition=IfCondition(LaunchConfiguration("launch_rviz")),
++        )
++    )
++
++    return ld
+diff --git a/mycobot_280/mycobot_280_moveit2/launch/move_group.launch.py b/mycobot_280/mycobot_280_moveit2/launch/move_group.launch.py
+index d6fcf2f..34b88e4 100644
+--- a/mycobot_280/mycobot_280_moveit2/launch/move_group.launch.py
++++ b/mycobot_280/mycobot_280_moveit2/launch/move_group.launch.py
+@@ -1,7 +1,79 @@
++import os
++
++from launch import LaunchDescription
++from launch.actions import DeclareLaunchArgument
++from launch.substitutions import LaunchConfiguration
++from launch_ros.parameter_descriptions import ParameterValue
+ from moveit_configs_utils import MoveItConfigsBuilder
+-from moveit_configs_utils.launches import generate_move_group_launch
++from moveit_configs_utils.launch_utils import DeclareBooleanLaunchArg, add_debuggable_node
+ 
+ 
+ def generate_launch_description():
+-    moveit_config = MoveItConfigsBuilder("firefighter", package_name="mycobot_280_moveit2").to_moveit_configs()
+-    return generate_move_group_launch(moveit_config)
++    moveit_config = (
++        MoveItConfigsBuilder("firefighter", package_name="mycobot_280_moveit2")
++        .sensors_3d()
++        .to_moveit_configs()
++    )
++
++    ld = LaunchDescription()
++
++    ld.add_action(DeclareBooleanLaunchArg("debug", default_value=False))
++    ld.add_action(
++        DeclareBooleanLaunchArg("allow_trajectory_execution", default_value=True)
++    )
++    ld.add_action(
++        DeclareBooleanLaunchArg("publish_monitored_planning_scene", default_value=True)
++    )
++    ld.add_action(
++        DeclareLaunchArgument(
++            "capabilities",
++            default_value=moveit_config.move_group_capabilities["capabilities"],
++        )
++    )
++    ld.add_action(
++        DeclareLaunchArgument(
++            "disable_capabilities",
++            default_value=moveit_config.move_group_capabilities["disable_capabilities"],
++        )
++    )
++    ld.add_action(DeclareBooleanLaunchArg("monitor_dynamics", default_value=False))
++
++    should_publish = LaunchConfiguration("publish_monitored_planning_scene")
++
++    move_group_configuration = {
++        "publish_robot_description_semantic": True,
++        "allow_trajectory_execution": LaunchConfiguration("allow_trajectory_execution"),
++        "capabilities": ParameterValue(
++            LaunchConfiguration("capabilities"), value_type=str
++        ),
++        "disable_capabilities": ParameterValue(
++            LaunchConfiguration("disable_capabilities"), value_type=str
++        ),
++        "publish_planning_scene": should_publish,
++        "publish_geometry_updates": should_publish,
++        "publish_state_updates": should_publish,
++        "publish_transforms_updates": should_publish,
++        "monitor_dynamics": False,
++        # Octomap: D435 포인트클라우드를 콜리전 오브젝트로 등록하기 위한 설정.
++        # sensors_3d.yaml의 sensor_plugin 설정만으로는 부족하고, 이 두 값을
++        # move_group에 별도로 넘겨줘야 PlanningSceneMonitor가 octomap을 생성함.
++        "octomap_frame": "g_base",
++        "octomap_resolution": 0.02,
++        "max_range": 2.0,
++    }
++
++    move_group_params = [
++        moveit_config.to_dict(),
++        move_group_configuration,
++    ]
++
++    add_debuggable_node(
++        ld,
++        package="moveit_ros_move_group",
++        executable="move_group",
++        output="screen",
++        parameters=move_group_params,
++        extra_debug_args=["--debug"],
++        additional_env={"DISPLAY": os.environ.get("DISPLAY", "")},
++    )
++    return ld

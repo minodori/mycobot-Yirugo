@@ -247,7 +247,8 @@ python3 d435_viewer_record.py --out tomato_bed.bag
 │                                                       ▼                 │
 │                                              /joint_states 발행          │
 └───────────────────────────────────│─────────────────────────────────────┘
-                                     │  (같은 ROS_DOMAIN_ID=10, 같은 LAN)
+                                     │  (같은 ROS_DOMAIN_ID, 같은 LAN — 2026-07-24 기준
+                                     │   실제 쓰는 값은 21, 아래 "실행 방법" 참고)
                                      ▼
 ┌─────────────────────────── RPi-5 (jetcobot@192.168.100.13) ────────────┐
 │                                                                         │
@@ -266,6 +267,63 @@ python3 d435_viewer_record.py --out tomato_bed.bag
 RViz Planning 탭 등 **무엇으로 시뮬레이션을 움직이든 상관없이** `/joint_states`만
 보고 실물이 따라 움직임.
 
+### 실행 방법
+
+⚠️ **안전 확인 먼저**: `sync_plan`을 시작하는 순간, 실물이 **그 시점의
+시뮬레이션 위치로 보간 없이 바로 이동**함. 노트북 쪽 시뮬레이션이 실물의
+현재 자세(보통 look pose)와 다른 곳에 가 있으면 큰 점프가 날 수 있음 —
+시작 전 RViz에서 시뮬레이션을 실물과 같은 자세(예: `look_pose` named
+state, 위 SRDF 항목 참고)로 맞춰두고 시작할 것. 팔 주변 사람/물건도 확인.
+
+1. 노트북에서 `demo_octomap.launch.py`(또는 `demo.launch.py`)가 이미 실행
+   중이어야 함 — `/joint_states`가 발행되고 있어야 `sync_plan`이 받을 게
+   있음.
+2. 노트북과 RPi가 **같은 `ROS_DOMAIN_ID`**를 쓰는지 확인. RPi
+   (`jetcobot_126b`)는 `.bashrc`에 기본값 `21`로 설정돼 있음(비대화형
+   SSH 명령으로는 `.bashrc`가 안 읽혀서 값이 안 보일 수 있음 — 대화형
+   쉘/실제 로그인 세션 기준). 노트북 쪽 값과 다르면 서로 안 보이므로
+   맞춰줄 것.
+3. RPi에 SSH 접속 후:
+   ```bash
+   ssh jetcobot_126b
+   source /opt/ros/jazzy/setup.bash
+   source ~/smh_ws/install/setup.bash
+   export ROS_DOMAIN_ID=21   # 노트북과 동일한 값으로
+   ros2 run mycobot_280_moveit2_control sync_plan
+   ```
+   원격에서 백그라운드로 띄우고 로그를 남기려면(비대화형 SSH 세션에서는
+   Python 표준출력이 파일로 리다이렉트될 때 블록 버퍼링돼서 실시간으로
+   안 보일 수 있음 — `PYTHONUNBUFFERED=1`을 같이 export하면 실시간으로 보임):
+   ```bash
+   ssh jetcobot_126b '
+     source /opt/ros/jazzy/setup.bash
+     source ~/smh_ws/install/setup.bash
+     export ROS_DOMAIN_ID=21
+     export PYTHONUNBUFFERED=1
+     nohup ros2 run mycobot_280_moveit2_control sync_plan > ~/sync_plan_session.log 2>&1 < /dev/null &
+     disown
+     echo "started with PID $!"
+   '
+   # 로그 확인
+   ssh jetcobot_126b 'tail -f ~/sync_plan_session.log'
+   ```
+4. 정상 시작되면 로그에 `port:/dev/ttyJETCOBOT, baud:1000000`이 뜨고,
+   `/joint_states`가 들어올 때마다 `data_list: [...]`가 찍힘(관절
+   순서는 `joint2_to_joint1 ~ joint6output_to_joint6`, 단위는 도(°)).
+5. 이후 노트북에서 `coord_to_goal_node`로 `/target_point`를 발행하든,
+   RViz Planning 탭에서 마커로 직접 움직이든 **그대로 실물에 동기화됨**.
+6. **끝낼 때**: RPi에서 해당 프로세스를 종료
+   (`pkill -f "sync_plan$"` 또는 시작할 때 받은 PID로 `kill`).
+
+⚠️ **포트 동시 접근 금지**: `sync_plan`이 `/dev/ttyJETCOBOT`(=
+`/dev/ttyUSB0`, 같은 물리 장치)을 물고 있는 동안, `get_angles()` 등으로
+실물 상태를 읽는 별도 pymycobot 스크립트를 **동시에 실행하면 안 됨** —
+시리얼 포트 동시 접근 충돌로 `sync_plan`이
+`SerialException: device reports readiness to read but returned no
+data (device disconnected or multiple access on port?)`로 크래시함
+(2026-07-24 실측, 실물 손상은 없었음). 상태 확인이 필요하면 `sync_plan`을
+잠시 멈추고 확인할 것.
+
 ### 겪은 문제: `sync_plan`이 실물을 못 움직임 (포트/보드레이트 불일치)
 
 `mycobot_280_moveit2_control`의 `sync_plan.py`는 `ls /dev/ttyUSB*`로 포트를
@@ -280,6 +338,30 @@ RViz Planning 탭 등 **무엇으로 시뮬레이션을 움직이든 상관없�
 ### 검증 완료
 - `/target_point` 발행 → 시뮬레이션(RViz) + 실물 로봇 동시 이동 확인
 - RViz Planning 탭 마우스 조작으로도 동일하게 실물 동기화됨 (경로 무관, `/joint_states`만 보므로)
+
+### 추가로 발견한 문제: joint6(손목) 회전 방향이 실물과 반대 (2026-07-24)
+
+RViz Planning 탭에서 인터랙티브 마커로 손목을 돌려 Plan & Execute 했을 때,
+시뮬레이션에서 돌린 방향과 실물 손목이 실제로 도는 방향이 반대임을 확인함
+(다른 5개 관절은 정상 — joint6output_to_joint6 하나만 증상 있음). 근본
+URDF의 `joint6output_to_joint6` axis를 뒤집으면 이미 확정된 look pose
+수치(`docs/look_pose.md`, `initial_positions.yaml`, SRDF `look_pose`
+group_state)가 전부 의미가 바뀌므로, 실물-시뮬 경계인 `sync_plan.py`에서
+이 관절 각도만 부호를 반전시켜 보냄(`sync_plan.py`의
+`listener_callback()`에 `if joint == 'joint6output_to_joint6':
+radians_to_angles = -radians_to_angles` 추가). RPi(`~/smh_ws`)의 실행
+중인 파일에 직접 패치 후 재시작해 반영 확인(로그에 마지막 값 부호가
+반전된 것 확인). 이 패치는 이전 포트/보드레이트 수정과 마찬가지로
+`mycobot_ros2`(elephantrobotics 원본 clone, git으로 안 잡히는 로컬 diff)
+안에 있어 별도 커밋 대상 아님 — RPi/노트북 양쪽 로컬 diff로만 존재.
+
+### SRDF에 `look_pose` named state 추가 (2026-07-24)
+
+RViz Planning 탭의 Select Start/Goal State 드롭다운에 `init_pose`만 있고
+`look_pose`가 없어서, 마커를 매번 손으로 다시 맞춰야 했음. `firefighter.srdf`에
+`initial_positions.yaml`과 동일한 라디안 값으로 `look_pose` group_state를
+추가 → 드롭다운에서 바로 선택 후 Plan & Execute로 복귀 가능해짐(SRDF는
+move_group 시작 시 1회만 로드되므로 스택 재시작 필요).
 
 ---
 
@@ -358,185 +440,11 @@ camera_link`) — 그러면 realsense가 발행하는 내부 체인과 자연스
 
 ---
 
-## 9. SO-ARM101 임시 스탠드인으로 카메라 static transform 실측
+## 9~11. 카메라 마운트 실측/좌표 조사
 
-mycobot 실물이 아직 없어서(집에는 SO-ARM101만 있음, mycobot은 월요일 학원에서
-사용 가능), SO-ARM101 그리퍼 위 D435 위치를 임시로 `g_base` 기준 카메라
-위치로 간주하고 `demo_octomap.launch.py`의 `camera_x/y/z/roll/pitch/yaw`
-값을 실측해서 넣음.
-
-### 실측 절차
-1. SO-ARM 베이스(고정된 지점)를 `g_base`로 간주
-2. 그리퍼 위 카메라까지 줄자로 x(앞뒤)/y(좌우)/z(높이) 측정, 카메라가
-   보는 방향을 각도로 대략 측정해 roll/pitch/yaw로 변환(도→라디안)
-3. `demo_octomap.launch.py`의 `DeclareLaunchArgument` 기본값에 반영
-
-### 검증: 실제 포인트클라우드로 좌표 확인
-카메라 정면 ~330mm 지점의 실제 점 하나를 `g_base` 기준으로 변환해서, 손으로
-계산한 예상값과 대조 → 거의 정확히 일치 확인 (변환 로직 자체는 정확함).
-
-### 발견한 문제: 원뿔(Free Voxels) 가운데가 비어 보임
-`g_base`가 SO-ARM(실물)과 mycobot(RViz 시뮬레이션 모델)이라는 **서로 다른
-두 로봇이 공유하는 좌표계**라서, 카메라가 보는 실제 공간이 시뮬레이션
-mycobot 모델의 몸체와 우연히 겹치면 `PointCloudOctomapUpdater`의 자기 몸
-필터(`shape_mask`)가 실제 관측 포인트를 걸러냄. `camera_pitch`를 올리면
-(카메라 시야가 아래로 꺾이며 mycobot 모델 몸체를 덜 스치게 되어) 더 많이
-보이지만, **이건 좌표가 더 정확해져서가 아니라 필터링이 덜 되는 것뿐** —
-실제 카메라는 수평(pitch=0)이니 pitch=0이 정답이고, 시각화가 덜 되는 건
-SO-ARM/mycobot 좌표계 공유로 인한 부작용. 실물 mycobot으로 넘어가면(카메라와
-로봇이 같은 개체가 되므로) 해소될 것으로 예상.
-
-### 중요한 개념 정리: static transform은 "로봇이 정지해 있을 때"만 유효
-
-- **YOLO 좌표 계산(look 단계)**: 정해진 자세에서 촬영 → 좌표 계산까지 끝나면
-  그 이후엔 결과가 고정값이라 로봇이 움직여도 상관없음 (`coord_to_goal_node`가
-  받는 목표 좌표는 이미 계산 완료된 절대좌표). 문서 2장에 정리된
-  "look-then-move" 전략과 정확히 맞물림.
-- **Octomap(실시간 갱신)**: D435가 계속 스트리밍하며 실시간 갱신되는데,
-  static transform은 로봇이 움직이면 더 이상 실제 카메라 위치와 안 맞음 →
-  **로봇이 움직이는 동안 Octomap이 잘못된 위치에 쌓이기 시작함.**
-- **결론**: 지금 하는 static transform 튜닝은 "로봇이 가만히 있는 상태"까지만
-  유효한 임시방편. 로봇이 움직이는 동안에도 Octomap이 정확하려면, 관절
-  각도에 따라 실시간으로 갱신되는 TF(=정식 핸드-아이 캘리브레이션, 3단계)가
-  필요함 — 이게 3단계가 근본적으로 필요한 이유.
-
-### 내일(mycobot 연결 후) 다시 해야 할 것
-1. `camera_x/y/z/roll/pitch/yaw`를 mycobot 기준으로 재실측 (절차는 동일,
-   로봇만 SO-ARM→mycobot으로 교체)
-2. 원뿔 가운데가 비어 보이던 문제가 해소되는지 확인 (오늘 가설 검증)
-3. YOLO+D435 → `/target_point` → `coord_to_goal_node` 전체 파이프라인 첫
-   end-to-end 테스트
-4. 여유되면 정식 핸드-아이 캘리브레이션(`easy_handeye2`) 착수
-
----
-
-## 10. mycobot 실물 연결 후 카메라 위치 재실측
-
-mycobot 그리퍼 위에 D435를 장착하고 카메라가 토마토 베드를 보도록 자세를
-잡은 뒤, `camera_x/y/z/roll/pitch/yaw`를 다시 잡음.
-
-### 순기구학(FK) 스크립트로 관절 각도 → 카메라 위치 자동 계산 시도
-
-`scripts/compute_camera_transform.py` 작성 — `pymycobot.get_angles()`로 읽은
-관절 각도 6개(도 단위)를 `mycobot_280_m5.urdf`의 조인트 원점 값으로 순기구학
-계산해서 `g_base -> joint6_flange` 변환을 자동으로 뽑아주는 스크립트.
-`init_pose`(전부 0도)로 검증 시 높이 0.411m — 데이터시트 예상치(~0.4m)와 일치.
-
-실제 관측 자세(관절각 `[0.52, -90.96, -0.52, 89.2, 90.08, -0.61]`)를 넣어
-계산한 값:
-```
-camera_x=0.2094, camera_y=-0.0171, camera_z=0.2004
-camera_roll=-1.5707, camera_pitch=0.0291, camera_yaw=0.0105
-```
-
-### 실측값과 대조 — roll이 90도 어긋남을 발견
-
-같은 자세에서 직접 줄자/눈으로 실측한 값은 `x=0.23m, y=0.06m, z=0.25m,
-roll=pitch=yaw=0(거의 수평)`. **위치(x,y,z)는 FK와 몇 cm 이내로 비슷했지만,
-회전(특히 roll)이 90도나 차이남.**
-
-**원인**: FK는 `joint6_flange`(URDF 링크)의 좌표축을 그대로 카메라의
-광학축이라고 가정했는데, 실제로는 **카메라가 flange에 물리적으로 마운트되며
-생기는 고정 회전 오프셋**이 있음 (그리퍼 브라켓이 flange 좌표축과 정확히
-평행하게 붙어있지 않음). 이 오프셋을 모르면 FK의 위치값은 대략 믿을 수
-있어도 회전값은 신뢰할 수 없음.
-
-**결론**: 지금은 FK 대신 실측값(`x=0.23, y=0.06, z=0.25, rpy=0`)을
-`demo_octomap.launch.py` 기본값으로 사용. FK 스크립트는 "위치 어림값을 빨리
-얻는 용도"로는 여전히 유용하지만, 회전까지 정확히 자동 계산하려면
-flange→카메라 고정 오프셋을 별도로 알아내야 함 (이 오프셋 자체도 결국
-캘리브레이션의 일부).
-
-### RViz "Publish Point"로 실제 좌표 직접 확인하는 방법 확립
-
-Occupied/Free Voxels가 화면에서 이상하게(멀고, g_base보다 아래로) 보여서
-한참 의심했으나, RViz 툴바에 **Publish Point** 도구를 추가(`+` 버튼)해서
-복셀에 마우스를 올리면 상태바에 정확한 좌표가 뜬다는 걸 확인함. 이걸로
-직접 대조한 결과:
-- 가까운 물체(손, 카메라 앞 10~20cm): `z ≈ -0.03` (g_base 근처, 정상)
-- 먼 배경(1m+ 떨어진 벽/바닥 등): `z ≈ -0.21` (g_base보다 뚜렷이 아래)
-
-**결론: 버그가 아니었음.** 책상(로봇 베이스) 뒤로 보이는 바닥/벽 같은 먼
-배경이 자연스럽게 낮게 잡히는 것이었고, 관심 대상(가까운 물체)은 애초부터
-정확하게 잡히고 있었음. 전체 복셀 뭉치를 한눈에 볼 때 가까운 것과 먼 것이
-섞여서 "위치가 이상하다"는 착시가 생긴 것. **앞으로 Octomap 위치를 검증할
-때는 Publish Point로 관심 대상 복셀만 개별적으로 찍어서 확인**하는 게
-전체 뭉치를 눈으로 보고 판단하는 것보다 훨씬 정확함.
-
----
-
-## 11. 카메라 정면 방향이 flange의 X축이 아니라 Z축이었음 (핵심 발견)
-
-시뮬레이션 로봇 모델을 실제 관절 각도로 맞춰보니, "카메라가 오른쪽을 보고
-있어야 하는데 Octomap 복셀은 아래쪽에 나온다"는 불일치를 발견함.
-
-### 원인
-
-`compute_camera_transform.py`가 처음부터 **"카메라의 정면 = flange의 로컬
-X축"**이라고 가정했는데, 실제로는 **"카메라의 정면 = flange의 로컬 Z축"**
-이었음. flange의 각 로컬 축이 `g_base`에서 가리키는 방향을 직접 벡터로
-확인해서 발견함:
-- flange 로컬 **Z축** → g_base 기준 거의 정확히 **+Y**(카메라가 실제로
-  보는 방향)
-- flange 로컬 **X축** → g_base 기준 거의 **+X**(제가 잘못 가정했던 "정면")
-
-이게 이전부터 계속 나타났던 "FK로 계산한 roll이 실측/눈으로 본 것과 90도
-차이난다"는 문제의 근본 원인이었음 — 축을 잘못 짚어서 생긴 체계적 오차였고,
-로봇 자세마다 달라지는 "임의의 오차"가 아니었음.
-
-### 왜 눈으로 미리 못 잡았나
-"카메라가 안 기울고 안 숙여져 있다(roll/pitch≈0)"는 수평/중력 기준으로
-눈으로 판단 가능하지만, "어느 수평 방향(yaw)을 보고 있는지"는 `g_base`라는
-추상적 좌표계 기준으로 눈으로 판단할 방법이 없음 — 특히 팔이 크게 꺾인
-자세(joint2≈-86도)에서는 더더욱. 그래서 매번 "rpy≈0"이라고 눈으로 판단한
-게 yaw 부분에서 계속 틀렸던 것.
-
-### 추가 정정: 카메라는 flange가 아니라 joint6 링크에 마운트됨
-
-위 발견 직후, 실물을 다시 보니 **카메라가 joint6_flange(그리퍼, J6에 따라
-회전하는 부분)가 아니라 joint6 링크 자체**(J6 회전과 무관한 고정 부분)에
-붙어있다는 걸 확인함 — J6(마지막 관절, 손목 회전)을 돌리면 그리퍼만 돌고
-카메라는 그대로임. 그래서 FK 계산에서 J6을 빼고(J1~J5만 사용) joint6까지의
-변환으로 다시 계산해야 함. 이때 joint6 로컬 축과 g_base를 대조해보니
-"카메라 정면 = joint6의 로컬 X축이 아니라 로컬 **Y축**"으로 확인됨 (flange
-기준으로 봤을 때의 Z축과는 또 다름 — joint6→joint6_flange 사이에 고정
-회전이 하나 더 있어서 축이 다시 한번 바뀜).
-
-### 해결
-`compute_camera_transform.py`를 joint6 기준으로 다시 작성 — FK는 J1~J5만
-사용하고, `CAMERA_FROM_JOINT6` 고정 회전 행렬(joint6 기준 Z축으로 90도 회전과
-동일: camera_X=joint6_Y, camera_Y=-joint6_X, camera_Z=joint6_Z)로 자동
-보정. 이제 관절 각도(J6 포함해서 그대로 입력해도 무방, 내부적으로 무시함)만
-넣으면 정확한 roll/pitch/yaw가 나옴. `demo_octomap.launch.py` 기본값도
-갱신함(`roll=-0.0815, pitch=-0.001, yaw=1.5675`, 관절각
-`[0.52,-86.04,-0.52,91.23,89.29,0.61]` 기준).
-
-**교훈**: 로봇 마운트에 카메라를 달 때, (1) "어느 링크에 물리적으로
-고정되어 있는지"(어떤 관절을 돌려도 같이 안 움직이는지 직접 확인)와
-(2) "정면 방향이 그 링크의 어느 축인지"를 둘 다 가정하지 말고 실측/FK로
-직접 확인해야 함. 둘 다 처음엔 잘못 가정해서 두 번 고쳤음.
-
-### 추가로 발견한 것: 자기 몸 필터가 자세에 따라 가까운 영역을 통째로 지움
-
-팔을 거의 수직으로 세운 자세(init_pose 근처)로 테스트하니, 카메라 정면
-가까운 범위(벽까지 포함)가 Octomap에서 전부 사라지는 현상 발견. 원본
-포인트클라우드(`/camera/camera/depth/color/points`를 RViz PointCloud2
-디스플레이로 직접 확인)에는 벽이 뚜렷이 잡히는데, Octomap(자기 몸 필터를
-거친 결과)에는 없음 — 두 디스플레이를 나란히 켜서 직접 대조해 확인.
-
-**원인**: 이 자세에서는 카메라가 g_base 원점(=시뮬레이션 mycobot 몸체가
-서있는 자리) 바로 옆에 있어서, 카메라가 보는 가까운 공간 전체가 시뮬레이션
-로봇 몸체와 겹침 → `shape_mask` 자기 몸 필터가 실제 관측 데이터를 로봇
-자기 자신으로 오인해서 지움. SO-ARM 때 발견한 것과 같은 종류의 문제 —
-**임시 static transform이 실물이 아닌 시뮬레이션 로봇과 좌표계를 공유해서
-생기는 부작용**이지, 자기 몸 필터 자체의 결함은 아님.
-
-**중요**: 핸드-아이 캘리브레이션이 끝나면 이 문제는 근본적으로 해소됨 —
-카메라가 실물 로봇의 실시간 관절 상태에 정확히 묶이면, 자기 몸 필터는
-로봇 자기 자신만 정확히 걸러내고 벽 같은 외부 물체는 정상적으로 통과시킴.
-지금은 **카메라가 로봇 몸체에서 충분히 떨어져 보이는 자세를 골라서
-회피**하는 방식으로 대응함 (마지막 테스트 자세: 관절각
-`[0.17,-86.83,89.91,-0.79,89.2,0.7]`).
+문서가 너무 길어져서 별도 파일로 분리함 → **[`camera_mount_investigation.md`](camera_mount_investigation.md)**
+(SO-ARM101 스탠드인 실측, mycobot FK 재실측, 카메라 정면 축 발견 등, 챕터
+번호 9~11 그대로 유지).
 
 ---
 
@@ -546,7 +454,7 @@ X축"**이라고 가정했는데, 실제로는 **"카메라의 정면 = flange�
 | --- | --- | --- |
 | 1. `coord_to_goal_node` | ✅ 완료 | ❌ |
 | 2. YOLO+D435 연동 (좌표 계산) | ✅ 완료 | ❌ (카메라만) |
-| 3. 핸드-아이 캘리브레이션 | ✅ 완료 (`mycobot_d435_eih.calib`, 13장) — `demo_octomap.launch.py`에 반영 완료 | ✅ 필요 |
+| 3. 핸드-아이 캘리브레이션 | ✅ 완료 (`mycobot_d435_eih.calib`, [handeye_calibration.md](handeye_calibration.md) 13장) — `demo_octomap.launch.py`에 반영 완료 | ✅ 필요 |
 | 4. Octomap 연동 | ✅ 완료 (캘리브레이션 기반 joint6->camera_link 실시간 TF, 자기 몸 필터 padding_scale 튜닝(0.7)까지 완료, 벽/손으로 육안 검증함) | ❌ (D435만) |
 | 5. 실제 픽업 동작 | 대기 (그리퍼 URDF + 캘리브레이션 + 목표 주변 옥토맵 클리어 로직 필요) | ✅ 필수 |
 
@@ -555,193 +463,45 @@ mycobot 실물 연결 완료. SO-ARM101 병행 조사(`ycheng517/lerobot-ros` +
 
 ---
 
-## 13. 핸드-아이 캘리브레이션 (`easy_handeye2`) 설정
+## 13~15. 핸드-아이 캘리브레이션
 
-### 왜 필요한가
-
-Octomap용 static transform(11장)은 관절 각도가 바뀔 때마다 FK로 다시
-계산해서 launch 인자를 수동으로 갱신해야 하는 임시방편이었음. 정식
-핸드-아이 캘리브레이션을 마치면, camera_link -> g_base 변환이 실시간
-관절 상태로부터 자동으로 계산·발행되어 로봇이 움직여도 항상 정확함.
-카메라가 그리퍼(정확히는 joint6 링크)에 고정된 구조라 **Eye-in-Hand**
-방식 사용 (`docs` 8~9장에서부터 1순위로 정한 계획 그대로).
-
-### 설치
-
-- `easy_handeye2`는 ROS 배포판 apt에 없어서 소스 빌드함:
-  ```
-  cd ~/<workspace>/src
-  git clone https://github.com/marcoesposito1988/easy_handeye2.git
-  cd ..
-  colcon build --packages-select easy_handeye2_msgs easy_handeye2 --symlink-install
-  ```
-- 마커 검출은 `aruco_opencv` 패키지 사용 (apt로 설치 가능, C++ 노드라
-  소스 빌드 불필요):
-  ```
-  sudo apt install ros-jazzy-aruco-opencv
-  ```
-- 추가 런타임 의존성 (apt로 설치):
-  ```
-  sudo apt install python3-transforms3d
-  ```
-  (`rqt-gui`, `rqt-gui-py`, `python-qt-binding`은 이미 설치되어 있었음)
-
-### 구조 결정: 어디서 뭘 실행하나
-
-캘리브레이션은 로봇의 **실시간 엔코더 관절 각도**가 필요함 (Octomap
-작업 때 쓰던 FakeSystem 시뮬레이션 자세로는 안 됨 — 그건 명령값이지
-실측값이 아니라서). 그래서 `demo.launch.py` 스택 대신, 아래처럼 역할을
-나눔:
-
-- **RPi(jetcobot) 쪽** — 실제 하드웨어에 직접 연결된 것만:
-  - `follow_display` 노드 (mycobot_280jn 패키지) — 실제 관절 각도를
-    읽어(`get_radians()`) `/joint_states`로 발행:
-    ```
-    ros2 run mycobot_280jn follow_display --ros-args \
-      -p port:=/dev/ttyJETCOBOT -p baud:=1000000
-    ```
-    실행 전 서보를 릴리즈해서 손으로 자세를 잡을 수 있게 해야 함.
-  - D435 카메라 (`realsense2_camera`, image_raw/camera_info만 있으면
-    됨 — pointcloud는 캘리브레이션과 무관)
-- **로컬 PC 쪽** (`mycobot_280_moveit2/launch/handeye_calibration.launch.py`,
-  새로 작성):
-  - `robot_state_publisher` (moveit_configs_utils의 `generate_rsp_launch`
-    재사용) — 네트워크로 받은 `/joint_states`를 TF로 변환 (같은
-    ROS_DOMAIN_ID면 RPi가 어디 있든 topic이 그대로 보임)
-  - `aruco_opencv`의 `aruco_tracker_autostart` — 마커 인식, `marker_<id>`
-    프레임을 TF로 발행 (카메라가 로컬이든 RPi든 image 토픽만 보이면 됨)
-  - `easy_handeye2`의 `calibrate.launch.py` include — `calibration_type=
-    eye_in_hand`, `robot_base_frame=g_base`, `robot_effector_frame=joint6`
-    (joint6_flange 아님 — 11장에서 실측 확인한 대로 카메라는 joint6
-    자체에 고정), `tracking_base_frame=camera_color_optical_frame`,
-    `tracking_marker_frame=marker_0`
-  - `rviz2` (마커/로봇/TF 육안 확인용)
-
-### 사용법
-
-1. 마커 인쇄 (한 변 크기를 기억해둘 것 — `marker_size` 인자에 그대로 씀):
-   ```
-   ros2 run aruco_opencv create_marker 0
-   ```
-   출력에 나오는 "Marker side size"(미터)를 그대로 사용. g_base 기준
-   고정된 곳(책상/스탠드)에 평평하게 부착 — 로봇이 움직여도 마커는
-   움직이면 안 됨 (eye-in-hand의 전제).
-2. RPi: `follow_display` 실행, 카메라 실행 (위 명령 참고)
-3. 로컬 PC:
-   ```
-   ros2 launch mycobot_280_moveit2 handeye_calibration.launch.py \
-     marker_size:=<인쇄한 값>
-   ```
-4. rqt "Calibrate" GUI에서: 서보 릴리즈 상태로 팔을 손으로 잡고 마커가
-   항상 화면에 보이게 하면서, 회전 위주로 다양한 자세(각 축 최대한
-   크게, 최소 10~15개)를 잡아가며 매번 "Take sample" 클릭 → 15~20개
-   모이면 "Compute" → 결과 확인 → "Save"
-5. 저장 결과는 `~/.ros2/easy_handeye2/calibrations/<name>.calib`에 저장됨
-   (YAML 포맷, 확장자만 `.calib`). 이후 `demo_octomap.launch.py`의 수동
-   static_transform_publisher를 `easy_handeye2`의 `publish.launch.py`
-   include로 교체 예정.
-
-### 실제 진행하며 겪은 문제 (트러블슈팅)
-
-1. **TF 트리 충돌** — `tracking_base_frame`을 `camera_color_optical_frame`
-   으로 잡으면 안 됨. `easy_handeye2`의 `calibrate.launch.py`가
-   `robot_effector_frame -> tracking_base_frame`으로 임시 dummy static
-   transform을 발행하는데, `camera_color_optical_frame`은 이미
-   realsense2_camera 자신이 `camera_link -> camera_color_frame ->
-   camera_color_optical_frame` 체인으로 발행 중이라 부모가 두 개
-   생겨버림 (Octomap 작업 때 겪은 것과 같은 종류). **`tracking_base_frame`
-   은 realsense 자체 트리의 뿌리인 `camera_link`로 잡아야 함** —
-   `handeye_calibration.launch.py`에 이미 반영해둠.
-2. **rqt Calibrate GUI가 멈춤/무응답** — `Take Sample` 몇 번 하다 보면
-   Qt 이벤트 루프가 데드락 걸림 (`QSocketNotifier: Can only be used
-   with threads started with QThread` 경고와 관련된 것으로 추정, CPU
-   사용량도 0%로 떨어져서 진짜 데드락 확인함). GUI를 강제 종료하면 그때
-   까지 모은 샘플이 다 날아감. **해결책**: GUI 대신 `ros2 service call`
-   로 직접 진행 —
-   ```
-   ros2 service call /easy_handeye2/calibration/take_sample easy_handeye2_msgs/srv/TakeSample "{}"
-   ros2 service call /easy_handeye2/calibration/get_sample_list easy_handeye2_msgs/srv/TakeSample "{}"
-   ros2 service call /easy_handeye2/calibration/compute_calibration easy_handeye2_msgs/srv/ComputeCalibration "{}"
-   ros2 service call /easy_handeye2/calibration/save_calibration easy_handeye2_msgs/srv/SaveCalibration "{}"
-   ros2 service call /easy_handeye2/calibration/remove_sample easy_handeye2_msgs/srv/RemoveSample "{sample_index: 0}"
-   ```
-   (launch 파일 자체는 계속 켜둔 채로, 다른 터미널에서 이 명령들만
-   호출하면 됨. `handeye_server`가 살아있기만 하면 GUI 없이도 동일하게
-   동작함.)
-3. **`cv2.calibrateHandEye` 없음 (`AttributeError`)** — `~/.local`에 pip로
-   설치된 `opencv-python`(5.0.0, YOLO/ultralytics용으로 이전에 설치한
-   것)이 시스템 `python3-opencv`(4.6.0, apt)보다 import 우선순위가 높은데,
-   5.0.0에는 `calibrateHandEye`가 없음(API 개편으로 빠지거나 이름이
-   바뀐 것으로 추정). **해결책**: launch 실행 시 `PYTHONNOUSERSITE=1`을
-   붙여서 시스템 opencv(4.6.0)를 쓰도록 강제:
-   ```
-   PYTHONNOUSERSITE=1 ros2 launch mycobot_280_moveit2 handeye_calibration.launch.py marker_size:=0.05
-   ```
-   이 환경변수는 이 실행에만 적용되므로 다른 터미널의 YOLO 작업에는
-   영향 없음.
-4. **launch 프로세스 kill 시 orphan 발생 주의** — 멈춘 rqt 프로세스를
-   `kill`할 때 PID를 잘못 잡으면(`ros2 launch` 부모 프로세스 등) 의도치
-   않게 `handeye_server`/`dummy_publisher`까지 같이 죽고 카메라/aruco만
-   orphan으로 남는 상황이 있었음. `ps aux`로 정확한 PID를 확인하고 최소
-   범위로만 kill할 것.
-
-### 캘리브레이션 전후 비교
-
-**이전 (수동 FK, `compute_camera_transform.py`)**: g_base 기준으로 매
-자세마다 재계산 필요, 카메라 원점=joint6 원점(오프셋 0)이고 회전은
-joint6 기준 Z축 정확히 90도라고 가정.
-
-**이후 (`easy_handeye2`, 결과 이름 `mycobot_d435_eih`)**: `joint6 ->
-camera_link`가 로봇 자세와 무관한 고정값 하나로 나옴 (실시간 TF에
-얹히므로 관절이 움직여도 항상 유효).
-
-```yaml
-translation: {x: -0.0267, y: -0.0035, z: 0.0573}   # m
-rotation:    {x: -0.0079, y: -0.0157, z: 0.6198, w: 0.7846}
-```
-
-이전 가정과 비교하면:
-- **위치**: 오프셋을 0으로 가정했었는데 실제로는 약 **6.3cm** 떨어져
-  있었음 (카메라 렌즈와 joint6 원점 사이 실제 물리적 거리)
-- **회전**: 정확히 90도라고 가정했었는데 실제로는 약 **13.5도** 차이가
-  있었음
-
-이 어긋남이 그동안 Octomap에서 물체 위치가 실제보다 살짝 아래/옆으로
-보였던 원인 중 하나로 추정됨 (11장에서 관찰한 내용과 방향이 일치).
-
-**검증 방법**:
-1. (정성적, 우선 진행) `demo_octomap.launch.py`를 캘리브레이션 결과로
-   교체한 뒤, 팔을 서로 다른 2~3개 자세로 바꿔가며 카메라 앞 물체 위치가
-   Octomap에서 재계산 없이도 일관되게 맞는지 확인 (수동 FK 방식은 자세
-   바뀔 때마다 재계산해도 여전히 오차가 있었음 — 이게 핵심 차이).
-2. (정량적, 선택) `easy_handeye2`의 `evaluate.launch.py` +
-   `rqt_evaluator.py` — 캘리브레이션에 안 쓴 새 자세에서 마커를 관측해
-   예측 위치와 실제 위치 사이 오차를 실시간으로 보여줌. rqt 기반이라
-   위 트러블슈팅 2번과 같은 프리즈가 재발할 수 있음.
-
-### 상태
-
-✅ 완료 — `mycobot_d435_eih.calib` 저장됨. `demo_octomap.launch.py`도
-`easy_handeye2`의 `publish.launch.py`로 교체 완료, 벽/손을 놓고 실제로
-Octomap Occupied Voxels가 정확히 맞는 것까지 육안으로 검증함 (여러 번의
-`controller_manager` 서비스 기동 지연 문제를 겪었으나 이 launch 파일
-자체의 문제는 아니었고, 정상 실행 시엔 몇 초 안에 다 뜸).
-
-**추가 튜닝**: `sensors_3d.yaml`의 `padding_scale`을 기본값 1.0에서
-**0.7로 낮춤** — 1.0에서는 자기 몸 필터가 카메라 근처의 실제 물체(벽 등)
-까지 과도하게 걸러내는 경우가 있었음. 0.7로 낮추니 벽은 정확히 잡히고,
-손처럼 카메라에 더 가까운 물체를 앞에 두면 그 뒤 벽 부분에 정확히
-구멍(가려짐)이 뚫리는 것까지 확인함.
+문서가 너무 길어져서 별도 파일로 분리함 → **[`handeye_calibration.md`](handeye_calibration.md)**
+(`easy_handeye2` 설정/사용법, `moveit_calibration` 교차검증, 2026-07-23
+재검증 절차까지, 챕터 번호 13~15 그대로 유지).
 
 ---
 
-## 다음 세션에서 이어갈 작업 (우선순위)
+## 다음 세션에서 이어갈 작업 (우선순위, 2026-07-23 갱신)
 
-1. YOLO+D435 → `/target_point` → `coord_to_goal_node` 전체 파이프라인 첫
-   end-to-end 테스트 (mycobot 실물로, 이제 Octomap 충돌회피까지 살아있는
-   상태로 테스트 가능)
-2. 목표 주변 Octomap 클리어 로직 설계 — `coord_to_goal_node`가 목표로
-   접근하기 전 그 주변 voxel을 제외하도록
-3. 그리퍼 URDF 추가 검토
-4. (병행 가능) SO-ARM101용 MoveIt2 구성 조사 — `Pavankv92/lerobot_ws` 확인,
+**이번 세션(2026-07-23)에 완료된 것**: 그리퍼 URDF 자체충돌 SRDF 패치(3번
+항목 해결), 목표 플래닝 전 octomap 전체 클리어 로직(2번 항목 해결, 다만
+근본 해결은 아니고 완화 — 아래 참고), look pose 확정(`docs/look_pose.md`).
+
+1. **[신규, 최우선] [handeye_calibration.md](handeye_calibration.md) 15장
+   핸드-아이 캘리브레이션 재검증** — 실행 여부에 따라
+   그리퍼 근접거리 문제가 "노이즈"인지 "실제 근접"인지, 목표 좌표 어긋남이
+   캘리브레이션 탓인지 판가름 남
+2. `coord_to_goal_node`의 `approach_quat` 고정값(identity) 개선 — 지금은
+   목표 자세에 따라 IK가 아예 안 풀리는 경우가 많음(`Unable to sample any
+   valid states for goal tree`). 현재 자세 기준 orientation을 쓰거나
+   `weight_orientation`을 낮추는 방향 검토(단, pymoveit2가 near-zero
+   weight를 1.0으로 강제 보정하는 점 주의 — 완전히 자유롭게 하려면 다른
+   방법 필요)
+3. 그리퍼 근접거리(카메라 min-range) 노이즈 필터링 — octomap 전체 클리어는
+   임시방편이라, 실행 도중 새 프레임이 다시 같은 문제를 재현시킴. 근본
+   해결은 depth 근접거리 필터(realsense 쪽 threshold filter 등) 또는
+   1번 재검증으로 "노이즈 아님"이 확인되면 접근 방식 자체를 재검토
+4. YOLO+D435 → `/target_point` → `coord_to_goal_node` 전체 파이프라인 첫
+   end-to-end 테스트 (수동 좌표 테스트 절차는
+   [obstacle_avoidance_manual_test.md](obstacle_avoidance_manual_test.md) 참고)
+5. (병행 가능) SO-ARM101용 MoveIt2 구성 조사 — `Pavankv92/lerobot_ws` 확인,
    `coord_to_goal_node` 패턴을 SO-101 조인트/링크 이름으로 이식
+6. NVIDIA PRIME 오프로드 강제 적용이 RViz 카메라 디스플레이 SIGSEGV를
+   해결하는지 검증 ([handeye_calibration.md](handeye_calibration.md) 14장
+   트러블슈팅 4번, 아직 미검증 — 지금은
+   `rqt_image_view` 우회로 작업 중)
+7. **[운영상 주의]** `src/mycobot_ros2/`가 `.gitignore`로 전체 제외돼 있어,
+   이번 세션에 그 안에서 고친 SRDF/`initial_positions.yaml`/
+   `handeye_calibration.launch.py` 주석 수정이 git에 안 잡힘 — 재클론/재vendoring
+   시 유실 위험(automato_ws에서 실제로 한 번 겪은 문제와 동일 종류). 별도
+   patch 파일로 보관하거나 gitignore 예외 처리 검토 필요
